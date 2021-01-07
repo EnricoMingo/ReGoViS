@@ -27,7 +27,27 @@ if __name__ == '__main__':
         #1. sense robot state
         robot.sense()
 
+		# Build the matrix for the MPC
 
+		# A_bar = I - lambda * T * J * (J*P)^+ 
+
+		# B_bar = lambda * T * J * (J*P)^+ 
+
+		# A = A_bar^c
+
+		# B = Sum_{j=0}^{c-1} A^j * B_bar
+
+		# C = [I; -lambda *(J*P)^+]
+
+		# D = [0; lambda *(J*P)^+]
+
+		# For matrix exponential:
+
+		A = np.random.rand(3,3)
+		A_pow2 = np.linalg.matrix_power(A,2)
+		A_pow2_ = np.matmul(A,A)
+		
+		# A_pow2 = A_pow2_
 
         rospy.spin()
 
