@@ -2,6 +2,8 @@
 import rospy
 import xbot_interface.config_options as xbot_opt
 import xbot_interface.xbot_interface as xbot
+from gazebo_msgs.msg import ModelStates
+from cartesian_interface.pyci_all import *
 
 def createRobot():
     opt = xbot_opt.ConfigOptions()
@@ -18,16 +20,35 @@ def createRobot():
     opt.set_string_parameter('framework', 'ROS')
     return xbot.RobotInterface(opt)
 
+
+def extract_base_data(data):
+    id = data.name.index("coman")
+    base_pose_gazebo = data.pose[id]
+    base_twist_gazebo = data.twist[id]
+
+    base_pose = Affine3(pos=[base_pose_gazebo.position.x, base_pose_gazebo.position.y, base_pose_gazebo.position.z],
+                        rot=[base_pose_gazebo.orientation.w, base_pose_gazebo.orientation.x, base_pose_gazebo.orientation.y, base_pose_gazebo.orientation.z])
+    base_twist = [base_twist_gazebo.linear.x, base_twist_gazebo.linear.y, base_twist_gazebo.linear.z, base_twist_gazebo.angular.x, base_twist_gazebo.angular.y, base_twist_gazebo.angular.z]
+
+    return base_pose, base_twist
+
+
 if __name__ == '__main__':
     rospy.init_node("reference_governor")
 
     robot = createRobot()
 
+    rate = rospy.Rate(10)  # 10hz
     while not rospy.is_shutdown():
         #1. sense robot state
-        robot.sense()
+        data = rospy.wait_for_message("gazebo/model_states", ModelStates, timeout=None)
+        base_pose, base_twist = extract_base_data(data)
 
-		# Build the matrix for the MPC
+        robot.sense()
+        robot.model().setFloatingBaseState(base_pose, base_twist)
+
+
+        # Build the matrix for the MPC
 
 		# A_bar = I - lambda * T * J * (J*P)^+ 
 
@@ -43,13 +64,12 @@ if __name__ == '__main__':
 
 		# For matrix exponential:
 
-		A = np.random.rand(3,3)
-		A_pow2 = np.linalg.matrix_power(A,2)
-		A_pow2_ = np.matmul(A,A)
+        #A = np.random.rand(3,3)
+        #A_pow2 = np.linalg.matrix_power(A,2)
+        #A_pow2_ = np.matmul(A,A)
 		
 		# A_pow2 = A_pow2_
-
-        rospy.spin()
+        rate.sleep()
 
 
 
