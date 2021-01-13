@@ -7,6 +7,7 @@ from cartesian_interface.pyci_all import *
 from opensot_visual_servoing.msg import VisualFeature, VisualFeatures
 from sensor_msgs.msg import CameraInfo
 import numpy as np
+import time
 
 def createRobot():
     opt = xbot_opt.ConfigOptions()
@@ -91,53 +92,142 @@ def visjac_p(intrinsic, feat_vec, depths):
         L[i:i+2,:] = L_i
 
     return L
-# TO HERE####################################################################
+
+def discretizeMPC(A_bar,B_bar,C_bar,D_bar,c):
+    
+    # Function to go from discretized model (with sampling time T) to matrices 
+    # of the discrete-time model used by the MPC to close the loop at a sampling 
+    # time T_MPC = c *T
+    # Inputs:
+    # - A_bar, B_bar, C_bar, D_bar: matrices of the SS model already discretized 
+    #   with time sample $T
+    # - c: integer such that T_MPC = c * T
+    # Outputs:
+    # - A, B , C, D: matrices of the SS discrete-time model used by the MPC
+
+    nx,nu = np.shape(B_bar)
+    ny = np.shape(C_bar)[0]
+    A = A_bar
+    B_list = [B_bar]
+    B = B_bar
+    
+    t = time.time()
+    for ind in range(1,c):
+
+        B_list.append(np.matmul(A_bar,B_list[-1]))
+        B = B_list[-1] + B
+        A = np.matmul(A,A_bar)
+      
+    print(time.time() - t)
+    C = C_bar
+    D = D_bar
+
+    print(A)
+    print('---')
+    print(B)
+    print('---')
+          
+    # Maybe it is faster:
+
+    t = time.time()
+    A = np.linalg.matrix_power(A_bar,c)
+
+    B = np.zeros((n_features,n_features))
+    for j in range(0,c-1):
+        A_bar_j = np.linalg.matrix_power(A_bar,j) 
+        B = B + np.matmul(A_bar_j,B_bar)
+
+    print(time.time()-t)
+    print(A)
+    print('---')
+    print(B)
+    print('---')
+    
+    print('---')
+    
+    print('---')
+    
+    return A, B, C, D  
 
 if __name__ == '__main__':
     rospy.init_node("reference_governor")
 
     robot = createRobot()
 
+    # Subscriber to the camera_info topic
     camera_info_msg = rospy.wait_for_message("/camera/rgb/camera_info", CameraInfo, timeout=None)
     intrinsic = get_intrinsic_param(camera_info_msg)
 
-    rate = rospy.Rate(10)  # 10hz
+    # Publisher for the sequence of visual features
+    vis_ref_seq = rospy.Publisher("/visual_reference_governor/visual_reference_sequence", VisualFeatures, queue_size=10, latch=True)
+
+    # TODO: we need to set these parameters somewhere
+    # sampling time
+    T = 0.001   
+    # sampling time for the MPC
+    TMPC = 0.1  
+    # c parameter: it is such that TMPC = c * T
+    c = int(TMPC/T) 
+
+    rate = rospy.Rate(1/TMPC) 
+
     while not rospy.is_shutdown():
-        #1. sense robot state
+
+        # Sense robot state
         data = rospy.wait_for_message("gazebo/model_states", ModelStates, timeout=None)
         base_pose, base_twist = extract_base_data(data)
 
         robot.sense()
-        robot.model().setFloatingBaseState(base_pose, base_twist)
+        # TODO: need to get the robot FB by using specific code (now not available)
+        #robot.model().setFloatingBaseState(base_pose, base_twist)
 
-        #2 compute interaction matrix
+        # TODO: need to get (and not set) the following parameters
+        n_state = 34 
+        n_features = 8 
+        vs_gain = 1.5 # lambda from the stack 
+        
+        # TODO: compute the jacobian of the robot (nees specific code for this?). Now set as random matrix
+        J = np.random.rand(n_features,n_state) # HARD CODED JACOBIAN, TO DEBUG THE CODE
+
+        # Compute interaction matrix # TODO DOUBLE CHECK
         visual_features = rospy.wait_for_message("/image_processing/visual_features", VisualFeatures, timeout=None)
         features, depths = getFeaturesAndDepths(visual_features)
         L = visjac_p(intrinsic, features, depths)
  
+        # Build the matrices for the MPC
+        
+        # Identity matrix
+        I = np.eye(n_features)
 
+        # Null prokector matrix of the equality constraints # TODO: now identity, to be get from robot code?
+        P = np.eye(n_state)
 
-        # Build the matrix for the MPC
+        # J * P
+        JP = np.matmul(J,P)
+        
+        # (J*P)^+
+        JP_pinv = np.linalg.pinv(JP)
+        
+        # lambda * T * (J*P)^+
+        lambda_T_J_JP_pinv = vs_gain * T * np.matmul(J,JP_pinv)  
+        
+        A_bar = I - lambda_T_J_JP_pinv
+        B_bar = lambda_T_J_JP_pinv
+		        
+        lambda_JP_pinv = vs_gain * JP_pinv
+        C_bar = np.block([
+            [ np.eye(n_features) ],
+            [-lambda_JP_pinv     ]
+            ])
 
-		# A_bar = I - lambda * T * J * (J*P)^+ 
-
-		# B_bar = lambda * T * J * (J*P)^+ 
-
-		# A = A_bar^c
-
-		# B = Sum_{j=0}^{c-1} A^j * B_bar
-
-		# C = [I; -lambda *(J*P)^+]
-
-		# D = [0; lambda *(J*P)^+]
-
-		# For matrix exponential:
-
-        #A = np.random.rand(3,3)
-        #A_pow2 = np.linalg.matrix_power(A,2)
-        #A_pow2_ = np.matmul(A,A)
-		
-		# A_pow2 = A_pow2_
+        D_bar = np.block([
+            [ np.zeros((n_features,n_features)) ],
+            [ lambda_JP_pinv                    ]
+        ])
+        
+        # Discretizing to get A, B, C and D matrices for the MPC
+        A, B, C, D =  discretizeMPC(A_bar,B_bar,C_bar,D_bar,c) 
+        
         rate.sleep()
 
 
