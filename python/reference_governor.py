@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+from __future__ import division
 import rospy
 import xbot_interface.config_options as xbot_opt
 import xbot_interface.xbot_interface as xbot
@@ -106,7 +107,8 @@ def discretizeMPC(A_bar,B_bar,C_bar,D_bar,c):
     # - A, B , C, D: matrices of the SS discrete-time model used by the MPC
 
     nx,nu = np.shape(B_bar)
-    ny = np.shape(C_bar)[0]
+    ny,_ = np.shape(C_bar)
+
     A = A_bar
     B_list = [B_bar]
     B = B_bar
@@ -193,7 +195,7 @@ if __name__ == '__main__':
         visual_features = rospy.wait_for_message("/image_processing/visual_features", VisualFeatures, timeout=None)
         features, depths = getFeaturesAndDepths(visual_features)
         L = visjac_p(intrinsic, features, depths)
- 
+
         # Build the matrices for the MPC
         
         # Identity matrix
@@ -228,6 +230,75 @@ if __name__ == '__main__':
         # Discretizing to get A, B, C and D matrices for the MPC
         A, B, C, D =  discretizeMPC(A_bar,B_bar,C_bar,D_bar,c) 
         
+        # Simulating a sequence of references (to be able to publish something)
+
+        # Publish the visual features in x-y format
+        visualFeatures_msg = VisualFeatures()
+
+        # Number of features TODO: to be better computed
+        n_points = 4
+
+        # Preview window size: TODO: to be properly fixed
+        Np = 10
+        print(features)
+        for n in range(0,Np):
+
+            dummy_offset = ((n+1)/Np) * 50
+            
+
+            visualFeature_msg = VisualFeature()
+            
+            xx = features[0] * intrinsic['fx'] + intrinsic['cx'] 
+            yy = features[1] * intrinsic['fy'] + intrinsic['cy']
+
+
+            visualFeature_msg.x = xx + dummy_offset
+            visualFeature_msg.y = yy + dummy_offset 
+            visualFeature_msg.Z = 0 # TODO what should we put here??? The one at the final destination?
+            visualFeature_msg.type = visualFeature_msg.POINT
+
+            visualFeatures_msg.features.append(visualFeature_msg)
+
+            visualFeature_msg = VisualFeature()
+        
+            xx = features[2] * intrinsic['fx'] + intrinsic['cx'] 
+            yy = features[3] * intrinsic['fy'] + intrinsic['cy']
+
+            visualFeature_msg.x = xx + dummy_offset
+            visualFeature_msg.y = yy + dummy_offset 
+            visualFeature_msg.Z = 0 # TODO what should we put here??? The one at the final destination?
+            visualFeature_msg.type = visualFeature_msg.POINT
+
+            visualFeatures_msg.features.append(visualFeature_msg)
+
+            visualFeature_msg = VisualFeature()
+            
+            xx = features[4] * intrinsic['fx'] + intrinsic['cx'] 
+            yy = features[5] * intrinsic['fy'] + intrinsic['cy']
+
+            visualFeature_msg.x = xx + dummy_offset
+            visualFeature_msg.y = yy + dummy_offset 
+            visualFeature_msg.Z = 0 # TODO what should we put here??? The one at the final destination?
+            visualFeature_msg.type = visualFeature_msg.POINT
+
+            visualFeatures_msg.features.append(visualFeature_msg)
+
+            visualFeature_msg = VisualFeature()
+
+            xx = features[6] * intrinsic['fx'] + intrinsic['cx']
+            yy = features[7] * intrinsic['fy'] + intrinsic['cy']
+
+            visualFeature_msg.x = xx + dummy_offset
+            visualFeature_msg.y = yy + dummy_offset 
+            visualFeature_msg.Z = 0 # TODO what should we put here??? The one at the final destination?
+            visualFeature_msg.type = visualFeature_msg.POINT
+
+            visualFeatures_msg.features.append(visualFeature_msg)
+
+        visualFeatures_msg.header.stamp = rospy.Time.now()
+
+        vis_ref_seq.publish(visualFeatures_msg)
+
         rate.sleep()
 
 
