@@ -114,9 +114,9 @@ def discretizeMPC(A_bar,B_bar,C_bar,D_bar,c):
     B = B_bar
     
     t = time.time()
-    for ind in range(1,c):
-
-        B_list.append(np.matmul(A_bar,B_list[-1]))
+    
+    for ind in range(1,c): # from 1 to c-1
+        B_list.append(np.matmul(A_bar,B_list[-1])) # TODO Shouldn't A_bar be elevated to ind?
         B = B_list[-1] + B
         A = np.matmul(A,A_bar)
       
@@ -129,24 +129,26 @@ def discretizeMPC(A_bar,B_bar,C_bar,D_bar,c):
     print(B)
     print('---')
           
-    # Maybe it is faster:
+    # This is another option:
 
+    # For j = 0    
+    A = A_bar 
+    B = B_bar 
     t = time.time()
-    A = np.linalg.matrix_power(A_bar,c)
-
-    B = np.zeros((n_features,n_features))
-    for j in range(0,c-1):
-        A_bar_j = np.linalg.matrix_power(A_bar,j) 
-        B = B + np.matmul(A_bar_j,B_bar)
-
+    # For j from 1 to c-1
+    for j in range(1,c):
+        B = B + np.matmul(A,B_bar)
+        A = np.matmul(A,A_bar)
+    
     print(time.time()-t)
+   
     print(A)
     print('---')
     print(B)
     print('---')
     
     print('---')
-    
+    print(np.linalg.matrix_power(A_bar,c))
     print('---')
     
     return A, B, C, D  
@@ -232,28 +234,34 @@ if __name__ == '__main__':
         
         # Simulating a sequence of references (to be able to publish something)
 
-        # Publish the visual features in x-y format
+        # Prepare the visual features messages (for the reference sequence)
         visualFeatures_msg = VisualFeatures()
 
         # Number of features TODO: to be better computed
         n_points = 4
 
         # Preview window size: TODO: to be properly fixed
-        Np = 10
+        Np = 20
         print(features)
+
+        # This loop simulates a sequene of references, which will be computed by an MPC
+        offset = 50
+        dummy_des_feat = np.array([
+                    intrinsic['cx']-offset, intrinsic['cy']-offset, intrinsic['cx']+offset, intrinsic['cy']-offset,
+                    intrinsic['cx']+offset, intrinsic['cy']+offset, intrinsic['cx']-offset, intrinsic['cy']+offset])
+        
+
         for n in range(0,Np):
 
-            dummy_offset = ((n+1)/Np) * 50
-            
+            alpha = (n+1)/Np
 
             visualFeature_msg = VisualFeature()
             
             xx = features[0] * intrinsic['fx'] + intrinsic['cx'] 
             yy = features[1] * intrinsic['fy'] + intrinsic['cy']
 
-
-            visualFeature_msg.x = xx + dummy_offset
-            visualFeature_msg.y = yy + dummy_offset 
+            visualFeature_msg.x = (1-alpha) * xx + alpha * dummy_des_feat[0] 
+            visualFeature_msg.y = (1-alpha) * yy + alpha * dummy_des_feat[1] 
             visualFeature_msg.Z = 0 # TODO what should we put here??? The one at the final destination?
             visualFeature_msg.type = visualFeature_msg.POINT
 
@@ -264,8 +272,8 @@ if __name__ == '__main__':
             xx = features[2] * intrinsic['fx'] + intrinsic['cx'] 
             yy = features[3] * intrinsic['fy'] + intrinsic['cy']
 
-            visualFeature_msg.x = xx + dummy_offset
-            visualFeature_msg.y = yy + dummy_offset 
+            visualFeature_msg.x = (1-alpha) * xx + alpha * dummy_des_feat[2]
+            visualFeature_msg.y = (1-alpha) * yy + alpha * dummy_des_feat[3]
             visualFeature_msg.Z = 0 # TODO what should we put here??? The one at the final destination?
             visualFeature_msg.type = visualFeature_msg.POINT
 
@@ -276,8 +284,8 @@ if __name__ == '__main__':
             xx = features[4] * intrinsic['fx'] + intrinsic['cx'] 
             yy = features[5] * intrinsic['fy'] + intrinsic['cy']
 
-            visualFeature_msg.x = xx + dummy_offset
-            visualFeature_msg.y = yy + dummy_offset 
+            visualFeature_msg.x = (1-alpha) * xx + alpha * dummy_des_feat[4] 
+            visualFeature_msg.y = (1-alpha) * yy + alpha * dummy_des_feat[5] 
             visualFeature_msg.Z = 0 # TODO what should we put here??? The one at the final destination?
             visualFeature_msg.type = visualFeature_msg.POINT
 
@@ -288,8 +296,8 @@ if __name__ == '__main__':
             xx = features[6] * intrinsic['fx'] + intrinsic['cx']
             yy = features[7] * intrinsic['fy'] + intrinsic['cy']
 
-            visualFeature_msg.x = xx + dummy_offset
-            visualFeature_msg.y = yy + dummy_offset 
+            visualFeature_msg.x = (1-alpha) * xx + alpha * dummy_des_feat[6]
+            visualFeature_msg.y = (1-alpha) * yy + alpha * dummy_des_feat[7] 
             visualFeature_msg.Z = 0 # TODO what should we put here??? The one at the final destination?
             visualFeature_msg.type = visualFeature_msg.POINT
 
