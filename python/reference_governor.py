@@ -113,49 +113,100 @@ def discretizeMPC(A_bar,B_bar,C_bar,D_bar,c):
     B_list = [B_bar]
     B = B_bar
     
-    t = time.time()
-    
     for ind in range(1,c): # from 1 to c-1
-        B_list.append(np.matmul(A_bar,B_list[-1])) # TODO Shouldn't A_bar be elevated to ind?
+        B_list.append(np.matmul(A_bar,B_list[-1]))
         B = B_list[-1] + B
         A = np.matmul(A,A_bar)
       
-    print(time.time() - t)
     C = C_bar
     D = D_bar
-
-    print(A)
-    print('---')
-    print(B)
-    print('---')
           
-    # This is another option:
-
-    # For j = 0    
-    A = A_bar 
-    B = B_bar 
-    t = time.time()
-    # For j from 1 to c-1
-    for j in range(1,c):
-        B = B + np.matmul(A,B_bar)
-        A = np.matmul(A,A_bar)
+    ## This is another option:
+    ## For j = 0    
+    #A = A_bar 
+    #B = B_bar 
+    #t = time.time()
+    ## For j from 1 to c-1
+    #for j in range(1,c):
+    #    B = B + np.matmul(A,B_bar)
+    #    A = np.matmul(A,A_bar)
     
-    print(time.time()-t)
-   
-    print(A)
-    print('---')
-    print(B)
-    print('---')
-    
-    print('---')
-    print(np.linalg.matrix_power(A_bar,c))
-    print('---')
+    #For comparison
+    #print(np.linalg.matrix_power(A_bar,c))
     
     return A, B, C, D  
 
+def compute_system_matrices(J,J_const,vs_gain,T,c):
+
+    # Function used to compute the matrices of the system describing
+    # the closed-loop behavior of the visual servoing with a humanoid 
+    # robot:
+    #     s_{h+1} = A_h * s_h + B_h * s_star_h
+    #         y_h = C_h * s_h + D_h * s_star_h 
+    # Inputs:
+    # - J, the Jacobian of the VS task
+    # - J_const, the Jacobian of the task constraint 
+    # - vs_gain, control gain of the VS task
+    # - T, sampling time discretizing the time-continuous system
+    # - c, integer such that T_MPC = c * T, being T_MPC the sampling
+    #   of the MPC
+    # Outputs:
+    # - A_h, B_h, C_h and D_h matices 
+    
+    # Dimension of the robot state
+    _, n_state = np.shape(J)
+        
+    # Number of visual features
+    n_features, _ = np.shape(L)
+
+    # n x n identity matrix
+    I_n = np.eye(n_state)
+
+    # Null prokector matrix of the equality constraints 
+    J_const_pinv = np.linalg.pinv(J_const)
+    P = I_n - np.matmul(J_const_pinv,J_const)
+
+    # J * P
+    JP = np.matmul(J,P)
+    
+    # (J*P)^+
+    JP_pinv = np.linalg.pinv(JP)
+    
+    # lambda * T * (J*P)^+
+    lambda_T_J_JP_pinv = vs_gain * T * np.matmul(J,JP_pinv)  
+    
+    # f x f identity matrix
+    I_f = np.eye(n_features)
+
+    # A_bar
+    A_bar = I_f - lambda_T_J_JP_pinv
+    
+    # B_bar
+    B_bar = lambda_T_J_JP_pinv
+
+    # C_bar 
+    lambda_JP_pinv = vs_gain * JP_pinv
+    C_bar = np.block([
+        [ I_f ],
+        [-lambda_JP_pinv     ]
+        ])
+
+    # D_bar
+    D_bar = np.block([
+        [ np.zeros((n_features,n_features)) ],
+        [ lambda_JP_pinv                    ]
+    ])
+    
+    # Discretizing to get A, B, C and D matrices for the MPC
+    A, B, C, D =  discretizeMPC(A_bar, B_bar, C_bar, D_bar, c) 
+
+    return A, B, C, D
+
 if __name__ == '__main__':
+
     rospy.init_node("reference_governor")
 
+    # Create the robot 
     robot = createRobot()
 
     # Subscriber to the camera_info topic
@@ -212,64 +263,29 @@ if __name__ == '__main__':
         else:
             J_const, _ = robot.model().getCentroidalMomentumMatrix()
             
-        # Build the matrices for the MPC
-        
-        _, n_state = np.shape(J_camera)
-        n_features, _ = np.shape(L)
+        # Build the matrices for the MPC # TODO check if the computation time is OK
+        #t = time.time()
+        A, B, C, D = compute_system_matrices(J,J_const,vs_gain,T,c)
+        #print('Matrices computation time : ', time.time()-t)
 
-        # Identity matrix
-        I_n = np.eye(n_state)
-
-        # Null prokector matrix of the equality constraints 
-        J_const_pinv = np.linalg.pinv(J_const)
-        P = I_n - np.matmul(J_const_pinv,J_const)
-
-        # J * P
-        JP = np.matmul(J,P)
-        
-        # (J*P)^+
-        JP_pinv = np.linalg.pinv(JP)
-        
-        # lambda * T * (J*P)^+
-        lambda_T_J_JP_pinv = vs_gain * T * np.matmul(J,JP_pinv)  
-        
-        I_f = np.eye(n_features)
-
-        A_bar = I_f - lambda_T_J_JP_pinv
-        B_bar = lambda_T_J_JP_pinv
-		        
-        lambda_JP_pinv = vs_gain * JP_pinv
-        C_bar = np.block([
-            [ I_f ],
-            [-lambda_JP_pinv     ]
-            ])
-
-        D_bar = np.block([
-            [ np.zeros((n_features,n_features)) ],
-            [ lambda_JP_pinv                    ]
-        ])
-        
-        # Discretizing to get A, B, C and D matrices for the MPC
-        A, B, C, D =  discretizeMPC(A_bar,B_bar,C_bar,D_bar,c) 
-        
-        # Simulating a sequence of references (to be able to publish something)
-
-        # Prepare the visual features messages (for the reference sequence)
-        visualFeatures_msg = VisualFeatures()
+        # Simulating a sequence of references (to be able to publish something) # TODO to be substituted with MPCpy function
 
         # Number of features TODO: to be better computed
+        n_features, _ = np.shape(L)
         n_points = int(n_features/2)
 
-        # Preview window size: TODO: to be properly fixed
+        # Preview window size: TODO: to be properly set
         Np = 20
-        print(features)
 
         # This loop simulates a sequene of references, which will be computed by an MPC
         offset = 50
         dummy_des_feat = np.array([
                     intrinsic['cx']-offset, intrinsic['cy']-offset, intrinsic['cx']+offset, intrinsic['cy']-offset,
-                    intrinsic['cx']+offset, intrinsic['cy']+offset, intrinsic['cx']-offset, intrinsic['cy']+offset])
+                    intrinsic['cx']+offset, intrinsic['cy']+offset, intrinsic['cx']-offset, intrinsic['cy']+offset
+                    ])
         
+        # Visual features messages (for the reference sequence)
+        visual_reference_sequence_msg = VisualFeatures()
 
         for n in range(0,Np):
 
@@ -285,7 +301,7 @@ if __name__ == '__main__':
             visualFeature_msg.Z = 0 # TODO what should we put here??? The one at the final destination?
             visualFeature_msg.type = visualFeature_msg.POINT
 
-            visualFeatures_msg.features.append(visualFeature_msg)
+            visual_reference_sequence_msg.features.append(visualFeature_msg)
 
             visualFeature_msg = VisualFeature()
         
@@ -297,7 +313,7 @@ if __name__ == '__main__':
             visualFeature_msg.Z = 0 # TODO what should we put here??? The one at the final destination?
             visualFeature_msg.type = visualFeature_msg.POINT
 
-            visualFeatures_msg.features.append(visualFeature_msg)
+            visual_reference_sequence_msg.features.append(visualFeature_msg)
 
             visualFeature_msg = VisualFeature()
             
@@ -309,7 +325,7 @@ if __name__ == '__main__':
             visualFeature_msg.Z = 0 # TODO what should we put here??? The one at the final destination?
             visualFeature_msg.type = visualFeature_msg.POINT
 
-            visualFeatures_msg.features.append(visualFeature_msg)
+            visual_reference_sequence_msg.features.append(visualFeature_msg)
 
             visualFeature_msg = VisualFeature()
 
@@ -321,11 +337,11 @@ if __name__ == '__main__':
             visualFeature_msg.Z = 0 # TODO what should we put here??? The one at the final destination?
             visualFeature_msg.type = visualFeature_msg.POINT
 
-            visualFeatures_msg.features.append(visualFeature_msg)
+            visual_reference_sequence_msg.features.append(visualFeature_msg)
 
-        visualFeatures_msg.header.stamp = rospy.Time.now()
+        visual_reference_sequence_msg.header.stamp = rospy.Time.now()
 
-        vis_ref_seq.publish(visualFeatures_msg)
+        vis_ref_seq.publish(visual_reference_sequence_msg)
 
         rate.sleep()
 
