@@ -165,9 +165,10 @@ if __name__ == '__main__':
     # Publisher for the sequence of visual features
     vis_ref_seq = rospy.Publisher("/visual_reference_governor/visual_reference_sequence", VisualFeatures, queue_size=10, latch=True)
 
-    # TODO: we need to set these parameters somewhere
+    # TODO: Time parameters: do we need to set these parameters somewhere else?
     # sampling time
     T = 0.001   
+    
     # sampling time for the MPC
     TMPC = 0.1  
     # c parameter: it is such that TMPC = c * T
@@ -182,29 +183,46 @@ if __name__ == '__main__':
         base_pose, base_twist = extract_base_data(data)
 
         robot.sense()
-        # TODO: need to get the robot FB by using specific code (now not available)
+        # TODO: need to set the robot FB by using specific code (now not available)
         #robot.model().setFloatingBaseState(base_pose, base_twist)
 
-        # TODO: need to get (and not set) the following parameters
-        n_state = 34 
-        n_features = 8 
+        # TODO: should be taken from the cartesian interface
         vs_gain = 1.5 # lambda from the stack 
         
-        # TODO: compute the jacobian of the robot (nees specific code for this?). Now set as random matrix
-        J = np.random.rand(n_features,n_state) # HARD CODED JACOBIAN, TO DEBUG THE CODE
+        # Compute the jacobian of the robot
+        J_camera = robot.model().getJacobian('camera_link') 
 
-        # Compute interaction matrix # TODO DOUBLE CHECK
+        # Compute the interaction matrix (image Jacobian)# TODO DOUBLE CHECK
         visual_features = rospy.wait_for_message("/image_processing/visual_features", VisualFeatures, timeout=None)
         features, depths = getFeaturesAndDepths(visual_features)
         L = visjac_p(intrinsic, features, depths)
 
+        # Robot's camera frame to camera sensor twist transformation TODO to get from cartesian interface
+        V = np.eye(6)
+
+        # Compute the task Jacobian.
+        J = np.matmul(L,V)
+        J = np.matmul(J,J_camera)
+
+        # Compute the Jacobian of the equality constraint (CMM in air, contacts on the ground)
+        sim_on_earth = False
+        if sim_on_earth:
+            # TODO compute in case of in air sim. J_const =
+            J_const = 0
+        else:
+            J_const, _ = robot.model().getCentroidalMomentumMatrix()
+            
         # Build the matrices for the MPC
         
-        # Identity matrix
-        I = np.eye(n_features)
+        _, n_state = np.shape(J_camera)
+        n_features, _ = np.shape(L)
 
-        # Null prokector matrix of the equality constraints # TODO: now identity, to be get from robot code?
-        P = np.eye(n_state)
+        # Identity matrix
+        I_n = np.eye(n_state)
+
+        # Null prokector matrix of the equality constraints 
+        J_const_pinv = np.linalg.pinv(J_const)
+        P = I_n - np.matmul(J_const_pinv,J_const)
 
         # J * P
         JP = np.matmul(J,P)
@@ -215,12 +233,14 @@ if __name__ == '__main__':
         # lambda * T * (J*P)^+
         lambda_T_J_JP_pinv = vs_gain * T * np.matmul(J,JP_pinv)  
         
-        A_bar = I - lambda_T_J_JP_pinv
+        I_f = np.eye(n_features)
+
+        A_bar = I_f - lambda_T_J_JP_pinv
         B_bar = lambda_T_J_JP_pinv
 		        
         lambda_JP_pinv = vs_gain * JP_pinv
         C_bar = np.block([
-            [ np.eye(n_features) ],
+            [ I_f ],
             [-lambda_JP_pinv     ]
             ])
 
@@ -238,7 +258,7 @@ if __name__ == '__main__':
         visualFeatures_msg = VisualFeatures()
 
         # Number of features TODO: to be better computed
-        n_points = 4
+        n_points = int(n_features/2)
 
         # Preview window size: TODO: to be properly fixed
         Np = 20
