@@ -3,11 +3,13 @@ from __future__ import division
 import rospy
 import xbot_interface.config_options as xbot_opt
 import xbot_interface.xbot_interface as xbot
+from xbot_msgs.msg import JointState
 from gazebo_msgs.msg import ModelStates
 from cartesian_interface.pyci_all import *
 from opensot_visual_servoing.msg import VisualFeature, VisualFeatures
 from sensor_msgs.msg import CameraInfo
 import numpy as np
+import pandas as pd
 import time
 
 def createRobot():
@@ -37,6 +39,13 @@ def extract_base_data(data):
 
     return base_pose, base_twist
 
+# TODO: to be checked
+def extract_joint_data(data):
+
+    joint_positions = data.link_position
+    joint_velocities = data.link_velocity
+
+    return joint_positions, joint_velocities    
 
 def get_intrinsic_param(msg):
         
@@ -161,6 +170,15 @@ def compute_system_matrices(J,J_const,vs_gain,T,c):
 
     # n x n identity matrix
     I_n = np.eye(n_state)
+    
+    # f x f identity matrix
+    I_f = np.eye(n_features)
+
+    # f x n zero matrix
+    O_fn = np.zeros((n_features,n_state))
+    
+    # n x n zero matrix
+    O_n = np.zeros((n_state,n_state))
 
     # Null prokector matrix of the equality constraints 
     J_const_pinv = np.linalg.pinv(J_const)
@@ -172,30 +190,35 @@ def compute_system_matrices(J,J_const,vs_gain,T,c):
     # (J*P)^+
     JP_pinv = np.linalg.pinv(JP)
     
-    # lambda * T * (J*P)^+
-    lambda_T_J_JP_pinv = vs_gain * T * np.matmul(J,JP_pinv)  
-    
-    # f x f identity matrix
-    I_f = np.eye(n_features)
+    # lambda * T * J * (J*P)^+
+    lambda_T_J_JP_pinv = vs_gain * T * np.matmul(J,JP_pinv)
+
+    # lambda * (J*P)^+
+    lambda_JP_pinv = vs_gain * JP_pinv
 
     # A_bar
-    A_bar = I_f - lambda_T_J_JP_pinv
+    A11 = I_f - lambda_T_J_JP_pinv
+    A12 = O_fn #np.zeros((n_features, n_state))
+    A21 = - T * lambda_JP_pinv
+    A22 = I_n #np.eye(n_state)
+
+    A_bar = np.r_[np.c_[A11, A12],
+                  np.c_[A21, A22]]   
     
     # B_bar
-    B_bar = lambda_T_J_JP_pinv
-
+    B1 = lambda_T_J_JP_pinv
+    B2 = T * lambda_JP_pinv
+    B_bar = np.r_[B1, B2]
+        
     # C_bar 
-    lambda_JP_pinv = vs_gain * JP_pinv
-    C_bar = np.block([
-        [ I_f ],
-        [-lambda_JP_pinv     ]
-        ])
+    C1 = np.eye(n_features + n_state)
+    C2 = np.c_[-lambda_JP_pinv, O_n]
+    C_bar = np.r_[C1, C2]
 
     # D_bar
-    D_bar = np.block([
-        [ np.zeros((n_features,n_features)) ],
-        [ lambda_JP_pinv                    ]
-    ])
+    D1 = np.zeros((n_features + n_state, n_features))
+    D2 = lambda_JP_pinv
+    D_bar = np.r_[D1, D2]
     
     # Discretizing to get A, B, C and D matrices for the MPC
     A, B, C, D =  discretizeMPC(A_bar, B_bar, C_bar, D_bar, c) 
@@ -215,7 +238,7 @@ if __name__ == '__main__':
 
     # Publisher for the sequence of visual features
     vis_ref_seq = rospy.Publisher("/visual_reference_governor/visual_reference_sequence", VisualFeatures, queue_size=10, latch=True)
-
+    
     # TODO: Time parameters: do we need to set these parameters somewhere else?
     # sampling time
     T = 0.001   
@@ -228,14 +251,23 @@ if __name__ == '__main__':
     rate = rospy.Rate(1/TMPC) 
 
     while not rospy.is_shutdown():
-
-        # Sense robot state
+    
+        # Sense robot state: FB pose and velocity
         data = rospy.wait_for_message("gazebo/model_states", ModelStates, timeout=None)
         base_pose, base_twist = extract_base_data(data)
-
+    
+        # TODO: what exactily this function does?
         robot.sense()
+        
         # TODO: need to set the robot FB by using specific code (now not available)
-        #robot.model().setFloatingBaseState(base_pose, base_twist)
+        robot.model().setFloatingBaseState(base_pose, base_twist)
+        
+        robot.model().update()
+
+        q = robot.model().getJointPosition() # 35 x 1
+        q_dot = robot.model().getJointVelocity() # 35 x 1
+
+        n_state = len(q)
 
         # TODO: should be taken from the cartesian interface
         vs_gain = 1.5 # lambda from the stack 
@@ -244,7 +276,7 @@ if __name__ == '__main__':
         J_camera = robot.model().getJacobian('camera_link') 
 
         # Compute the interaction matrix (image Jacobian)# TODO DOUBLE CHECK
-        visual_features = rospy.wait_for_message("/image_processing/visual_features", VisualFeatures, timeout=None)
+        visual_features = rospy.wait_for_message("cartesian/visual_servoing_camera_link/features", VisualFeatures, timeout=None) # TODO : /image_processing/visual_features
         features, depths = getFeaturesAndDepths(visual_features)
         L = visjac_p(intrinsic, features, depths)
 
@@ -274,7 +306,10 @@ if __name__ == '__main__':
         n_features, _ = np.shape(L)
         n_points = int(n_features/2)
 
-        # Preview window size: TODO: to be properly set
+        # State MPC
+        x_MPC = np.r_[features.reshape(8,1),q.reshape(n_state,1),q_dot.reshape(n_state,1)] # TODO remove hard-coded numbers
+        
+        # Preview window size: TODO: to be properly set (as parameter?)
         Np = 20
 
         # This loop simulates a sequene of references, which will be computed by an MPC
@@ -286,6 +321,34 @@ if __name__ == '__main__':
         
         # Visual features messages (for the reference sequence)
         visual_reference_sequence_msg = VisualFeatures()
+
+        # TODO MPC SETUP
+
+        # TODO: MPC constraints: take (from Cartesio?) once, out of the loop
+        #limits.q_dot_lower = limits.q_dot_lower
+        #limits.q_dot_upper = limits.q_dot_upper
+        #y_min = np.r_[-1e6*np.ones(ns), limits.q_lower, limits.q_dot_lower]
+        #y_max = np.r_[1e6*np.ones(ns), limits.q_upper, limits.q_dot_upper]
+
+        # TODO: this should be before the loop
+        #K = MPCController(A=A_MPC, B=B_MPC, C=C_MPC, D=D_MPC, Np=Np, Q1=Q1, Q2=Q2, Q3=None, Q4=Q4, Q5=Q5, QDg=QDg, y_min=y_min, y_max=y_max)
+        #K.setup()  # setup cvxpy problem
+
+        # TODO fill with the proper values
+        # K.update(x0_val=x_step, s_d_val=s_d_val, s_star_minus1_val=s_star_step, y_minus1_val=y_step)
+
+        # TODO: get the ouptut
+        s_star_step = K.output()
+
+
+        '''print('here')
+        df = pd.DataFrame(J)
+        df.to_csv('~/Desktop/A.csv',index=False)
+        df = pd.DataFrame(J_const)
+        df.to_csv('~/Desktop/B.csv',index=False)
+        df = pd.DataFrame(x_MPC)
+        df.to_csv('~/Desktop/s_q_q_dot.csv',index=False)'''
+        
 
         for n in range(0,Np):
 
@@ -344,7 +407,3 @@ if __name__ == '__main__':
         vis_ref_seq.publish(visual_reference_sequence_msg)
 
         rate.sleep()
-
-
-
-
