@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 from __future__ import division
+from __future__ import print_function
 import rospy
 import xbot_interface.config_options as xbot_opt
 import xbot_interface.xbot_interface as xbot
@@ -9,8 +10,10 @@ from cartesian_interface.pyci_all import *
 from opensot_visual_servoing.msg import VisualFeature, VisualFeatures
 from sensor_msgs.msg import CameraInfo
 import numpy as np
+import scipy
 import pandas as pd
 import time
+from mpcref.mpc import MPCController
 
 def createRobot():
     opt = xbot_opt.ConfigOptions()
@@ -83,25 +86,78 @@ def visjac_p(intrinsic, feat_vec, depths):
 
     for i in np.arange(0,feat_vec.shape[0],2): # iterate over the feature vector
  	       
-        uv = np.array(feat_vec[i:i+2])
+        #uv = np.array(feat_vec[i:i+2])
+        xy = np.array(feat_vec[i:i+2])
 
         # Take the depth
         Z = depths[max(0,i//2)]
         
         # Convert to normalized image-plane coordinates
-        x = (uv[0] - intrinsic['cx']) / intrinsic['fx']
-        y = (uv[1] - intrinsic['cy']) / intrinsic['fy']
+        x = xy[0] #(uv[0] - intrinsic['cx']) / intrinsic['fx']
+        y = xy[1] #(uv[1] - intrinsic['cy']) / intrinsic['fy']
 
         L_i = np.array([
             [1/Z, 0,   -x/Z, -x*y,     (1+x*x), -y],
             [0,   1/Z, -y/Z, -(1+y*y), x*y,      x]
         ])
 
-        L_i = - np.matmul(np.diag([intrinsic['fx'], intrinsic['fy']]), L_i)
+        #L_i = - np.matmul(np.diag([intrinsic['fx'], intrinsic['fy']]), L_i)
 
-        L[i:i+2,:] = L_i
+        #L[i:i+2,:] = L_i
+        L[i:i+2,:] = -L_i
 
     return L
+
+# TODO: TO BE CHECKED
+def convert_to_normalized(features_in_pixel,intrinsic):
+
+    features_normalized = np.array([])
+
+    for i in np.arange(0,len(features_in_pixel),2): # iterate over the feature vector
+ 	       
+        uv = np.array(features_in_pixel[i:i+2])
+
+        # Convert to normalized image-plane coordinates
+        x = (uv[0] - intrinsic['cx']) / intrinsic['fx']
+        y = (uv[1] - intrinsic['cy']) / intrinsic['fy']
+
+        features_normalized = np.append(features_normalized, np.array([x, y]))
+
+    return features_normalized
+
+def convert_to_pixel(features_normalized,intrinsic):
+
+    features_in_pixel = np.array([])
+
+    for i in np.arange(0,len(features_normalized),2): # iterate over the feature vector
+
+        xy = np.array(features_normalized[i:i+2])
+
+        # Convert to normalized image-plane coordinates
+        u = xy[0] * intrinsic['fx'] + intrinsic['cx']  
+        v = xy[1] * intrinsic['fy'] + intrinsic['cy'] 
+
+        features_in_pixel = np.append(features_in_pixel, np.array([u, v]))
+
+    return features_in_pixel
+
+def fill_visualFeatures_msg(data_in):
+            
+    visualFeatures_msg = VisualFeatures()
+    
+    # TODO : this assumes that we work with points
+    for k in range(0,len(data_in),2):
+
+        visualFeature_msg = VisualFeature()
+    
+        visualFeature_msg.x = data_in[k]  
+        visualFeature_msg.y = data_in[k+1] 
+        visualFeature_msg.Z = 0.5 # TODO what should we put here??? The one at the final destination?
+        visualFeature_msg.type = visualFeature_msg.POINT
+        
+        visualFeatures_msg.features.append(visualFeature_msg)
+
+    return visualFeatures_msg
 
 def discretizeMPC(A_bar,B_bar,C_bar,D_bar,c):
     
@@ -236,19 +292,31 @@ if __name__ == '__main__':
     camera_info_msg = rospy.wait_for_message("/camera/rgb/camera_info", CameraInfo, timeout=None)
     intrinsic = get_intrinsic_param(camera_info_msg)
 
+    # Publisher for the sequence of visual features # TODO: it is not a sequence (or should it be?)
+    vis_ref_seq = rospy.Publisher("/reference_governor/reference_features", VisualFeatures, queue_size=10, latch=True) #/visual_reference_governor/visual_reference_sequence
+    
     # Publisher for the sequence of visual features
-    vis_ref_seq = rospy.Publisher("/visual_reference_governor/visual_reference_sequence", VisualFeatures, queue_size=10, latch=True)
+    des_feat_pub = rospy.Publisher("/reference_governor/desired_features", VisualFeatures, queue_size=10, latch=True) #/visual_reference_governor/visual_reference_sequence
     
-    # TODO: Time parameters: do we need to set these parameters somewhere else?
-    # sampling time
-    T = 0.001   
+    #### TODO: set from rosparam 
+
+    # Discretization sampling time
+    T = 0.001 # s
     
-    # sampling time for the MPC
-    TMPC = 0.1  
+    # Sampling time for the MPC
+    TMPC = 0.2 # s
+
     # c parameter: it is such that TMPC = c * T
     c = int(TMPC/T) 
 
-    rate = rospy.Rate(1/TMPC) 
+    # MPC prediction horizon
+    Np = 20 #20
+
+    ##### ##### #####
+    
+    rate = rospy.Rate(1./TMPC) 
+
+    first_time = True
 
     while not rospy.is_shutdown():
     
@@ -269,15 +337,20 @@ if __name__ == '__main__':
 
         n_state = len(q)
 
-        # TODO: should be taken from the cartesian interface
-        vs_gain = 1.5 # lambda from the stack 
+        # TODO: should be taken from the cartesian interface, NEED TO BE CONSISTENT WITH THE STACK OF TASK 
+        qp_control_period = 0.001 # TODO CAN WE TAKE FROM SOMEWHERE
+        vs_gain = 0.001 / qp_control_period # lambda from the stack 
         
         # Compute the jacobian of the robot
         J_camera = robot.model().getJacobian('camera_link') 
 
-        # Compute the interaction matrix (image Jacobian)# TODO DOUBLE CHECK
+        # Compute the interaction matrix (image Jacobian)# TODO DOUBLE CHECK THAT IS IDENTICAL TO THE ONE USED IN OPENSOT. IT WOULD BE PERFERCT TO TAKE IT DIRECTLY FROM robot.model()
+        #print('Waiting for visual_features topic...')
         visual_features = rospy.wait_for_message("cartesian/visual_servoing_camera_link/features", VisualFeatures, timeout=None) # TODO : /image_processing/visual_features
+        #visual_features = rospy.wait_for_message("/image_processing/visual_features", VisualFeatures, timeout=None) # TODO : the topic name has to be a parameter
         features, depths = getFeaturesAndDepths(visual_features)
+        
+        n_features = len(features) # TODO: n_features, n_s, etc: use one
         L = visjac_p(intrinsic, features, depths)
 
         # Robot's camera frame to camera sensor twist transformation TODO to get from cartesian interface
@@ -287,7 +360,7 @@ if __name__ == '__main__':
         J = np.matmul(L,V)
         J = np.matmul(J,J_camera)
 
-        # Compute the Jacobian of the equality constraint (CMM in air, contacts on the ground)
+        # Compute the Jacobian of the equality constraint (CMM in air, contacts Jacobian on the ground)
         sim_on_earth = False
         if sim_on_earth:
             # TODO compute in case of in air sim. J_const =
@@ -302,44 +375,102 @@ if __name__ == '__main__':
 
         # Simulating a sequence of references (to be able to publish something) # TODO to be substituted with MPCpy function
 
-        # Number of features TODO: to be better computed
-        n_features, _ = np.shape(L)
-        n_points = int(n_features/2)
-
-        # State MPC
-        x_MPC = np.r_[features.reshape(8,1),q.reshape(n_state,1),q_dot.reshape(n_state,1)] # TODO remove hard-coded numbers
+        # TODO: NEED TO TAKE DESIRED FEATURES FROM SOMEWHERE, at the moment we use dummy_des_feat ALSO: NEED TO BE CONSISTENT WITH THE UNITS!
+        #print('Waiting /reference_governor/desired_features')
+        #desired_features = rospy.wait_for_message("reference_governor/desired_features", VisualFeatures, timeout=None) 
+        #des_features, _ = getFeaturesAndDepths(desired_features)
+        #print("desired features:", des_features)
         
-        # Preview window size: TODO: to be properly set (as parameter?)
-        Np = 20
 
-        # This loop simulates a sequene of references, which will be computed by an MPC
-        offset = 50
-        dummy_des_feat = np.array([
-                    intrinsic['cx']-offset, intrinsic['cy']-offset, intrinsic['cx']+offset, intrinsic['cy']-offset,
-                    intrinsic['cx']+offset, intrinsic['cy']+offset, intrinsic['cx']-offset, intrinsic['cy']+offset
-                    ])
+        #offset = 50
+        #dummy_des_feat_pixel = np.array([
+        #            intrinsic['cx']-offset, intrinsic['cy']-offset, intrinsic['cx']+offset, intrinsic['cy']-offset,
+        #            intrinsic['cx']+offset, intrinsic['cy']+offset, intrinsic['cx']-offset, intrinsic['cy']+offset
+        #            ])
+        #dummy_des_feat = convert_to_normalized(dummy_des_feat_pixel,intrinsic)
+        #des_features = dummy_des_feat
+        #print("desired features 2: ", des_features)
         
-        # Visual features messages (for the reference sequence)
-        visual_reference_sequence_msg = VisualFeatures()
-
         # TODO MPC SETUP
 
-        # TODO: MPC constraints: take (from Cartesio?) once, out of the loop
-        #limits.q_dot_lower = limits.q_dot_lower
-        #limits.q_dot_upper = limits.q_dot_upper
-        #y_min = np.r_[-1e6*np.ones(ns), limits.q_lower, limits.q_dot_lower]
-        #y_max = np.r_[1e6*np.ones(ns), limits.q_upper, limits.q_dot_upper]
+        if first_time: # TODO SHOULD this be done outside the loop? (it takes too much time)
+            
+            print('Initializing...')
 
-        # TODO: this should be before the loop
-        #K = MPCController(A=A_MPC, B=B_MPC, C=C_MPC, D=D_MPC, Np=Np, Q1=Q1, Q2=Q2, Q3=None, Q4=Q4, Q5=Q5, QDg=QDg, y_min=y_min, y_max=y_max)
-        #K.setup()  # setup cvxpy problem
+            first_time = False
+            
+            # Set (and publish) the desired features as the first detected ones TODO: it might be a good idea to set desired features here and not in another
+            des_features = features
+            des_feat_pixel = convert_to_pixel(des_features,intrinsic) 
+            desired_features_msg = fill_visualFeatures_msg(des_features) # TODO: in this case no need to convert in pixel!
+            desired_features_msg.header.stamp = rospy.Time.now()
+            des_feat_pub.publish(desired_features_msg)
 
-        # TODO fill with the proper values
-        # K.update(x0_val=x_step, s_d_val=s_d_val, s_star_minus1_val=s_star_step, y_minus1_val=y_step)
+            # At the beginning send the desired features as reference
+            reference_features_msg = fill_visualFeatures_msg(des_features) # TODO: in this case also no need to convert in pixel!
+            reference_features_msg.header.stamp = rospy.Time.now()
+            vis_ref_seq.publish(reference_features_msg)
 
-        # TODO: get the ouptut
+            # dimensions
+            nx = A.shape[0]
+            ns = B.shape[1]
+            ny = C.shape[0]
+            nq = nx - ns
+            
+            # initializations
+            s_star_step = des_features
+            
+            # MPC weights
+            Q1 = 10*np.eye(ns)  # s_d - s
+            Q2 = 10*np.eye(ns)  # s_d - s_star
+            Q4 = scipy.linalg.block_diag(np.zeros((ns+nq, ns+nq)), np.eye(nq))
+            QDg = np.eye(ns)
+            Q5 = 1e4    
+            
+            # MPC constraints 
+            q_dot_lower = -robot.model().getVelocityLimits() 
+            q_dot_upper = robot.model().getVelocityLimits() 
+            q_lower, q_upper = robot.model().getJointLimits() 
+          
+            s_min = convert_to_normalized(0*np.ones(ns),intrinsic)
+            s_max = convert_to_normalized(np.array([640,480,640,480,640,480,640,480]),intrinsic)
+            
+            y_min = np.r_[s_min, q_lower, q_dot_lower]
+            y_max = np.r_[s_max, q_upper, q_dot_upper]
+
+            K = MPCController(A=A, B=B, C=C, D=D, Np=Np, 
+                              Q1=Q1, Q2=Q2, Q3=None, Q4=Q4, Q5=Q5, QDg=QDg, 
+                              y_min=y_min, y_max=y_max)
+    
+            K.setup()  # setup cvxpy problem
+
+        # Update the MPC with the current values
+        print("Computing a new reference...")
+        
+        # State MPC read from the sensors
+        y_step = np.r_[features.reshape(ns,1),q.reshape(nq,1),q_dot.reshape(nq,1)] 
+        x_step = np.r_[features.reshape(ns,1),q.reshape(nq,1)] 
+        
+        K.update(x0_val=x_step.flatten(),
+                 s_d_val=des_features, #  
+                 s_star_minus1_val=s_star_step, 
+                 y_minus1_val=y_step.flatten(), 
+                 A=A, B=B, C=C, D=D)
+
+        #Get the MPC ouptut
         s_star_step = K.output()
+        
+        print("New reference computed: ", s_star_step)
 
+        # Publish the new reference
+        # Visual features messages (for the reference sequence) TODO: outside the loop?
+        s_star_pixel = convert_to_pixel(s_star_step,intrinsic)
+        reference_features_msg = fill_visualFeatures_msg(s_star_step)
+        reference_features_msg.header.stamp = rospy.Time.now()
+
+        vis_ref_seq.publish(reference_features_msg)
+
+        rate.sleep()
 
         '''print('here')
         df = pd.DataFrame(J)
@@ -349,7 +480,7 @@ if __name__ == '__main__':
         df = pd.DataFrame(x_MPC)
         df.to_csv('~/Desktop/s_q_q_dot.csv',index=False)'''
         
-
+        '''
         for n in range(0,Np):
 
             alpha = (n+1)/Np
@@ -401,9 +532,5 @@ if __name__ == '__main__':
             visualFeature_msg.type = visualFeature_msg.POINT
 
             visual_reference_sequence_msg.features.append(visualFeature_msg)
-
-        visual_reference_sequence_msg.header.stamp = rospy.Time.now()
-
-        vis_ref_seq.publish(visual_reference_sequence_msg)
-
-        rate.sleep()
+        '''
+        
