@@ -332,10 +332,8 @@ if __name__ == '__main__':
         
         robot.model().update()
 
-        q = robot.model().getJointPosition() # 35 x 1
-        q_dot = robot.model().getJointVelocity() # 35 x 1
-
-        n_state = len(q)
+        q = robot.model().getJointPosition() 
+        q_dot = robot.model().getJointVelocity()
 
         # TODO: should be taken from the cartesian interface, NEED TO BE CONSISTENT WITH THE STACK OF TASK 
         qp_control_period = 0.001 # TODO CAN WE TAKE FROM SOMEWHERE
@@ -350,38 +348,29 @@ if __name__ == '__main__':
         #visual_features = rospy.wait_for_message("/image_processing/visual_features", VisualFeatures, timeout=None) # TODO : the topic name has to be a parameter
         features, depths = getFeaturesAndDepths(visual_features)
         
-        n_features = len(features) # TODO: n_features, n_s, etc: use one
         L = visjac_p(intrinsic, features, depths)
 
         # Robot's camera frame to camera sensor twist transformation TODO to get from cartesian interface
         V = np.eye(6)
 
-        # Compute the task Jacobian.
+        # Compute the task Jacobian: L * V * J_camera
         J = np.matmul(L,V)
         J = np.matmul(J,J_camera)
 
-        # Compute the Jacobian of the equality constraint (CMM in air, contacts Jacobian on the ground)
+        # Compute the Jacobian of the equality constraint (CMM in space, contacts Jacobian on earth)
         sim_on_earth = False
         if sim_on_earth:
-            # TODO compute in case of in air sim. J_const =
+            # TODO compute in case of on earth sim.
             J_const = 0
-        else:
+        else: # in space
             J_const, _ = robot.model().getCentroidalMomentumMatrix()
             
-        # Build the matrices for the MPC # TODO check if the computation time is OK
+        # Build the matrices for the MPC # TODO check if the computation time is OK, use MARCO's function
         #t = time.time()
         A, B, C, D = compute_system_matrices(J,J_const,vs_gain,T,c)
         #print('Matrices computation time : ', time.time()-t)
 
         # Simulating a sequence of references (to be able to publish something) # TODO to be substituted with MPCpy function
-
-        # TODO: NEED TO TAKE DESIRED FEATURES FROM SOMEWHERE, at the moment we use dummy_des_feat ALSO: NEED TO BE CONSISTENT WITH THE UNITS!
-        #print('Waiting /reference_governor/desired_features')
-        #desired_features = rospy.wait_for_message("reference_governor/desired_features", VisualFeatures, timeout=None) 
-        #des_features, _ = getFeaturesAndDepths(desired_features)
-        #print("desired features:", des_features)
-        
-
         #offset = 50
         #dummy_des_feat_pixel = np.array([
         #            intrinsic['cx']-offset, intrinsic['cy']-offset, intrinsic['cx']+offset, intrinsic['cy']-offset,
@@ -391,17 +380,15 @@ if __name__ == '__main__':
         #des_features = dummy_des_feat
         #print("desired features 2: ", des_features)
         
-        # TODO MPC SETUP
-
-        if first_time: # TODO SHOULD this be done outside the loop? (it takes too much time)
+        if first_time: # MCP initialization 
             
-            print('Initializing...')
+            print('Initializing MPC...')
 
             first_time = False
             
-            # Set (and publish) the desired features as the first detected ones TODO: it might be a good idea to set desired features here and not in another
+            # Set (and publish) the desired features as the first detected ones
             des_features = features
-            des_feat_pixel = convert_to_pixel(des_features,intrinsic) 
+            des_feat_pixel = convert_to_pixel(des_features,intrinsic) # TODO: probably, no need anymore
             desired_features_msg = fill_visualFeatures_msg(des_features) # TODO: in this case no need to convert in pixel!
             desired_features_msg.header.stamp = rospy.Time.now()
             des_feat_pub.publish(desired_features_msg)
@@ -411,18 +398,17 @@ if __name__ == '__main__':
             reference_features_msg.header.stamp = rospy.Time.now()
             vis_ref_seq.publish(reference_features_msg)
 
-            # dimensions
+            # Useful dimensions
             nx = A.shape[0]
             ns = B.shape[1]
-            ny = C.shape[0]
             nq = nx - ns
             
-            # initializations
+            # Initialization of the solution
             s_star_step = des_features
             
             # MPC weights
-            Q1 = 10*np.eye(ns)  # s_d - s
-            Q2 = 10*np.eye(ns)  # s_d - s_star
+            Q1 = 100*np.eye(ns)  # s_d - s
+            Q2 = 100*np.eye(ns)  # s_d - s_star
             Q4 = scipy.linalg.block_diag(np.zeros((ns+nq, ns+nq)), np.eye(nq))
             QDg = np.eye(ns)
             Q5 = 1e4    
@@ -433,7 +419,7 @@ if __name__ == '__main__':
             q_lower, q_upper = robot.model().getJointLimits() 
           
             s_min = convert_to_normalized(0*np.ones(ns),intrinsic)
-            s_max = convert_to_normalized(np.array([640,480,640,480,640,480,640,480]),intrinsic)
+            s_max = convert_to_normalized(np.array([640,480,640,480,640,480,640,480]),intrinsic) # TODO: can I get the size of the image from somewhere?
             
             y_min = np.r_[s_min, q_lower, q_dot_lower]
             y_max = np.r_[s_max, q_upper, q_dot_upper]
@@ -444,6 +430,8 @@ if __name__ == '__main__':
     
             K.setup()  # setup cvxpy problem
 
+            print('MPC initialized.')
+
         # Update the MPC with the current values
         print("Computing a new reference...")
         
@@ -451,10 +439,10 @@ if __name__ == '__main__':
         y_step = np.r_[features.reshape(ns,1),q.reshape(nq,1),q_dot.reshape(nq,1)] 
         x_step = np.r_[features.reshape(ns,1),q.reshape(nq,1)] 
         
-        K.update(x0_val=x_step.flatten(),
-                 s_d_val=des_features, #  
-                 s_star_minus1_val=s_star_step, 
-                 y_minus1_val=y_step.flatten(), 
+        K.update(x0_val = x_step.flatten(),
+                 s_d_val = des_features, 
+                 s_star_minus1_val = s_star_step, 
+                 y_minus1_val = y_step.flatten(), 
                  A=A, B=B, C=C, D=D)
 
         #Get the MPC ouptut
@@ -463,8 +451,7 @@ if __name__ == '__main__':
         print("New reference computed: ", s_star_step)
 
         # Publish the new reference
-        # Visual features messages (for the reference sequence) TODO: outside the loop?
-        s_star_pixel = convert_to_pixel(s_star_step,intrinsic)
+        s_star_pixel = convert_to_pixel(s_star_step,intrinsic) # TODO: probably, no need anymore
         reference_features_msg = fill_visualFeatures_msg(s_star_step)
         reference_features_msg.header.stamp = rospy.Time.now()
 
