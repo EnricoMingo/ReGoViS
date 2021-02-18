@@ -108,7 +108,7 @@ def visjac_p(intrinsic, feat_vec, depths):
 
     return L
 
-# TODO: TO BE CHECKED
+# TODO: TO BE CHECKED: https://visp-doc.inria.fr/doxygen/visp-daily/tutorial-ibvs.html
 def convert_to_normalized(features_in_pixel,intrinsic):
 
     features_normalized = np.array([])
@@ -304,13 +304,13 @@ if __name__ == '__main__':
     T = 0.001 # s
     
     # Sampling time for the MPC
-    TMPC = 0.2 # s
+    TMPC = 0.3 # s
 
     # c parameter: it is such that TMPC = c * T
     c = int(TMPC/T) 
 
     # MPC prediction horizon
-    Np = 20 #20
+    Np = 15 #20
 
     ##### ##### #####
     
@@ -337,8 +337,7 @@ if __name__ == '__main__':
 
         # TODO: should be taken from the cartesian interface, NEED TO BE CONSISTENT WITH THE STACK OF TASK 
         qp_control_period = 0.001 # TODO CAN WE TAKE FROM SOMEWHERE
-        vs_gain = 0.001 / qp_control_period # lambda from the stack 
-        
+            
         # Compute the jacobian of the robot
         J_camera = robot.model().getJacobian('camera_link') 
 
@@ -358,13 +357,27 @@ if __name__ == '__main__':
         J = np.matmul(J,J_camera)
 
         # Compute the Jacobian of the equality constraint (CMM in space, contacts Jacobian on earth)
-        sim_on_earth = False
+        sim_on_earth = True # TODO it has to be a parameter, e.g. ROS parameter
         if sim_on_earth:
+            print('SIM ON EARTH')
             # TODO compute in case of on earth sim.
-            J_const = 0
+            J_rf = robot.model().getJacobian('r_sole')
+            J_lf = robot.model().getJacobian('l_sole')
+            J_contacts = np.block([ [J_rf],[J_lf] ])
+            J_com = robot.model().getCOMJacobian()
+            J_const = np.block([
+                [J_contacts],
+                [J_com]
+                ])
+            vs_gain = 0.0005 / qp_control_period # lambda from the stack / qp_control period
         else: # in space
+            print('SIM IN SPACE')
             J_const, _ = robot.model().getCentroidalMomentumMatrix()
-            
+            vs_gain = 0.001 / qp_control_period # lambda from the stack / qp_control period
+
+        #rosservice call /cartesian/visual_servoing_camera_link/get_task_properties
+        #rospy.wait_for_service('add_two_ints')
+        
         # Build the matrices for the MPC # TODO check if the computation time is OK, use MARCO's function
         #t = time.time()
         A, B, C, D = compute_system_matrices(J,J_const,vs_gain,T,c)
@@ -408,7 +421,7 @@ if __name__ == '__main__':
             
             # MPC weights
             Q1 = 100*np.eye(ns)  # s_d - s
-            Q2 = 100*np.eye(ns)  # s_d - s_star
+            Q2 = 10*np.eye(ns)  # s_d - s_star
             Q4 = scipy.linalg.block_diag(np.zeros((ns+nq, ns+nq)), np.eye(nq))
             QDg = np.eye(ns)
             Q5 = 1e4    
