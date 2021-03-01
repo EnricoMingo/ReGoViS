@@ -7,13 +7,19 @@ import xbot_interface.xbot_interface as xbot
 from xbot_msgs.msg import JointState
 from gazebo_msgs.msg import ModelStates
 from cartesian_interface.pyci_all import *
+from cartesian_interface.srv import GetTaskInfo
 from opensot_visual_servoing.msg import VisualFeature, VisualFeatures
 from sensor_msgs.msg import CameraInfo
+from std_msgs.msg import Float32
 import numpy as np
 import scipy
 import pandas as pd
 import time
-from mpcref.mpc import MPCController
+#from mpcref.mpc import MPCController
+from mpcref.mpc_osqp import MPCController
+
+data = ModelStates()
+visual_features = VisualFeatures()
 
 def createRobot():
     opt = xbot_opt.ConfigOptions()
@@ -29,7 +35,6 @@ def createRobot():
     opt.set_string_parameter('model_type', 'RBDL')
     opt.set_string_parameter('framework', 'ROS')
     return xbot.RobotInterface(opt)
-
 
 def extract_base_data(data):
     id = data.name.index("coman")
@@ -218,12 +223,9 @@ def compute_system_matrices(J,J_const,vs_gain,T,c):
     # Outputs:
     # - A_h, B_h, C_h and D_h matices 
     
-    # Dimension of the robot state
-    _, n_state = np.shape(J)
-        
-    # Number of visual features
-    n_features, _ = np.shape(L)
-
+    # Dimension of the visual features and robot state
+    n_features, n_state = np.shape(J)
+    
     # n x n identity matrix
     I_n = np.eye(n_state)
     
@@ -281,6 +283,14 @@ def compute_system_matrices(J,J_const,vs_gain,T,c):
 
     return A, B, C, D
 
+def model_states_cb(msg):
+    global data
+    data = msg 
+
+def visual_features_cb(msg):
+    global visual_features
+    visual_features = msg 
+
 if __name__ == '__main__':
 
     rospy.init_node("reference_governor")
@@ -298,32 +308,71 @@ if __name__ == '__main__':
     # Publisher for the sequence of visual features
     des_feat_pub = rospy.Publisher("/reference_governor/desired_features", VisualFeatures, queue_size=10, latch=True) #/visual_reference_governor/visual_reference_sequence
     
-    #### TODO: set from rosparam 
+    # Publisher for computation time
+    comp_time_pub = rospy.Publisher("/reference_governor/time", Float32, queue_size=10, latch=True)
 
+
+    # TODO PUT THESE PARAMETERS IN THE LAUCH FILE
     # Discretization sampling time
-    T = 0.001 # s
-    
-    # Sampling time for the MPC
-    TMPC = 0.3 # s
+    T = rospy.get_param('regovis_system_sampling_time', default=0.001) # s
+   
+    # TODO: should be taken from the cartesian interface, NEED TO BE CONSISTENT WITH THE STACK OF TASK 
+    qp_control_period = T # Assumption: the QP control period match with the discretization time of the system
+        
+    # Sampling time for the MPC (according to real-time)
+    TMPC = rospy.get_param('regovis_MPC_sampling_time', default=0.2) # s
 
+    sim_on_earth = rospy.get_param('regovis_sim_on_earth', default=True)
+
+    # MPC prediction horizon
+    Np = rospy.get_param('regovis_preview_window_size', default=15)
+    
     # c parameter: it is such that TMPC = c * T
     c = int(TMPC/T) 
 
-    # MPC prediction horizon
-    Np = 15 #20
-
-    ##### ##### #####
-    
     rate = rospy.Rate(1./TMPC) 
 
     first_time = True
 
+    task_prop_name_srv = '/cartesian/visual_servoing_camera_link/get_task_properties'
+    rospy.wait_for_service(task_prop_name_srv)
+    try:
+        task_info = rospy.ServiceProxy(task_prop_name_srv, GetTaskInfo)#, prova_getinfo)
+        qp_gain = task_info().lambda_
+        print('QP gain: ', qp_gain)
+    except rospy.ServiceException, e:
+        print("Service call failed: %s"%e)
+
+    vs_gain = qp_gain / qp_control_period # lambda from the stack / qp_control period
+
+    # Time log
+    time_log_file = '/tmp/reference_governor_times.csv'
+    df = pd.DataFrame({'t_robot_sense': [], 't_mpc': [], 't_loop': [], 't_matrixes':[], 'T_MPC':[]})
+    df.to_csv(time_log_file,index=True)
+
+    # Wait for sensors once 
+    global data 
+    rospy.Subscriber("gazebo/model_states", ModelStates, model_states_cb)
+    data = rospy.wait_for_message("gazebo/model_states", ModelStates, timeout=None)
+    
+    global visual_features
+    rospy.Subscriber("cartesian/visual_servoing_camera_link/features", VisualFeatures, visual_features_cb)
+    visual_features = rospy.wait_for_message("cartesian/visual_servoing_camera_link/features", VisualFeatures, timeout=None) # TODO : /image_processing/visual_features
+    
+    # RG LOOP
     while not rospy.is_shutdown():
-    
+        
+        # Get initial time
+        time_cycle_start = rospy.get_time() # in seconds # 
+        time_cycle_start_wall = time.time() # in seconds # 
+        
         # Sense robot state: FB pose and velocity
-        data = rospy.wait_for_message("gazebo/model_states", ModelStates, timeout=None)
+        #data = rospy.wait_for_message("gazebo/model_states", ModelStates, timeout=None)
+        #id = data.name.index("coman")
+        #base_pose_gazebo = data.pose[id]
+        #print('>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> data: ',base_pose_gazebo)
         base_pose, base_twist = extract_base_data(data)
-    
+        
         # TODO: what exactily this function does?
         robot.sense()
         
@@ -333,17 +382,18 @@ if __name__ == '__main__':
         robot.model().update()
 
         q = robot.model().getJointPosition() 
-        q_dot = robot.model().getJointVelocity()
-
-        # TODO: should be taken from the cartesian interface, NEED TO BE CONSISTENT WITH THE STACK OF TASK 
-        qp_control_period = 0.001 # TODO CAN WE TAKE FROM SOMEWHERE
-            
+        #q_dot = robot.model().getJointVelocity()
+    
         # Compute the jacobian of the robot
         J_camera = robot.model().getJacobian('camera_link') 
 
         # Compute the interaction matrix (image Jacobian)# TODO DOUBLE CHECK THAT IS IDENTICAL TO THE ONE USED IN OPENSOT. IT WOULD BE PERFERCT TO TAKE IT DIRECTLY FROM robot.model()
         #print('Waiting for visual_features topic...')
-        visual_features = rospy.wait_for_message("cartesian/visual_servoing_camera_link/features", VisualFeatures, timeout=None) # TODO : /image_processing/visual_features
+        #time_message_start = rospy.get_time() # time.time()
+        #time_message_start = time.time()
+        #visual_features = rospy.wait_for_message("cartesian/visual_servoing_camera_link/features", VisualFeatures, timeout=None) # TODO : /image_processing/visual_features
+        #print('visual_features time: ', time.time()-time_message_start)
+        #print('Message time: ', rospy.get_time() - time_message_start)
         #visual_features = rospy.wait_for_message("/image_processing/visual_features", VisualFeatures, timeout=None) # TODO : the topic name has to be a parameter
         features, depths = getFeaturesAndDepths(visual_features)
         
@@ -355,12 +405,13 @@ if __name__ == '__main__':
         # Compute the task Jacobian: L * V * J_camera
         J = np.matmul(L,V)
         J = np.matmul(J,J_camera)
+        
+        t_robot_sense = time.time() - time_cycle_start_wall
 
         # Compute the Jacobian of the equality constraint (CMM in space, contacts Jacobian on earth)
-        sim_on_earth = True # TODO it has to be a parameter, e.g. ROS parameter
         if sim_on_earth:
-            print('SIM ON EARTH')
-            # TODO compute in case of on earth sim.
+            #print('SIM ON EARTH') 
+            # TODO Enrico : check that it is consistent with QP
             J_rf = robot.model().getJacobian('r_sole')
             J_lf = robot.model().getJacobian('l_sole')
             J_contacts = np.block([ [J_rf],[J_lf] ])
@@ -369,19 +420,24 @@ if __name__ == '__main__':
                 [J_contacts],
                 [J_com]
                 ])
-            vs_gain = 0.0005 / qp_control_period # lambda from the stack / qp_control period
         else: # in space
-            print('SIM IN SPACE')
+            #print('SIM IN SPACE')
             J_const, _ = robot.model().getCentroidalMomentumMatrix()
-            vs_gain = 0.001 / qp_control_period # lambda from the stack / qp_control period
 
-        #rosservice call /cartesian/visual_servoing_camera_link/get_task_properties
-        #rospy.wait_for_service('add_two_ints')
-        
         # Build the matrices for the MPC # TODO check if the computation time is OK, use MARCO's function
-        #t = time.time()
+        t_matrix_start = time.time()
         A, B, C, D = compute_system_matrices(J,J_const,vs_gain,T,c)
+        t_matrix = time.time() - t_matrix_start
         #print('Matrices computation time : ', time.time()-t)
+
+        # Useful dimensions
+        nx = A.shape[0]
+        ns = B.shape[1]
+        nq = nx - ns
+
+        # MPC state read from the sensors
+        #y_step = np.r_[features.reshape(ns,1),q.reshape(nq,1),q_dot.reshape(nq,1)] 
+        x_step = np.r_[features.reshape(ns,1), q.reshape(nq,1)] 
 
         # Simulating a sequence of references (to be able to publish something) # TODO to be substituted with MPCpy function
         #offset = 50
@@ -410,58 +466,62 @@ if __name__ == '__main__':
             reference_features_msg = fill_visualFeatures_msg(des_features) # TODO: in this case also no need to convert in pixel!
             reference_features_msg.header.stamp = rospy.Time.now()
             vis_ref_seq.publish(reference_features_msg)
-
-            # Useful dimensions
-            nx = A.shape[0]
-            ns = B.shape[1]
-            nq = nx - ns
             
             # Initialization of the solution
             s_star_step = des_features
             
             # MPC weights
-            Q1 = 100*np.eye(ns)  # s_d - s
-            Q2 = 10*np.eye(ns)  # s_d - s_star
-            Q4 = scipy.linalg.block_diag(np.zeros((ns+nq, ns+nq)), np.eye(nq))
-            QDg = np.eye(ns)
+            Q1 = 100*scipy.sparse.eye(ns)  # s_d - s
+            Q2 = 50*scipy.sparse.eye(ns)   # s_d - s_star
+            Q4 = 0*scipy.sparse.eye(nq)
+            QDg = scipy.sparse.eye(ns)
             Q5 = 1e4    
             
-            # MPC constraints 
+            # MPC constraints # TODO we can probably move this upper in the beginning of the main
             q_dot_lower = -robot.model().getVelocityLimits() 
-            q_dot_upper = robot.model().getVelocityLimits() 
+            q_dot_upper =  robot.model().getVelocityLimits() 
             q_lower, q_upper = robot.model().getJointLimits() 
           
             s_min = convert_to_normalized(0*np.ones(ns),intrinsic)
             s_max = convert_to_normalized(np.array([640,480,640,480,640,480,640,480]),intrinsic) # TODO: can I get the size of the image from somewhere?
             
-            y_min = np.r_[s_min, q_lower, q_dot_lower]
-            y_max = np.r_[s_max, q_upper, q_dot_upper]
-
-            K = MPCController(A=A, B=B, C=C, D=D, Np=Np, 
-                              Q1=Q1, Q2=Q2, Q3=None, Q4=Q4, Q5=Q5, QDg=QDg, 
-                              y_min=y_min, y_max=y_max)
-    
-            K.setup()  # setup cvxpy problem
+            #y_min = np.r_[s_min, q_lower, q_dot_lower]
+            #y_max = np.r_[s_max, q_upper, q_dot_upper]
+            x_min = np.r_[s_min, q_lower]
+            x_max = np.r_[s_max, q_upper]
+            delta_x_min = np.r_[-1e6*np.ones(ns), TMPC * q_dot_lower] # TODO : enrico: is this correct?
+            delta_x_max = np.r_[ 1e6*np.ones(ns), TMPC * q_dot_upper]
+            
+            # Setup Reference Governor
+            K = MPCController(
+                A=A, B=B, 
+                s_d=features, 
+                Np=Np, 
+                Q1=Q1, Q2=Q2, Q3=None, Q4=Q4, Q5=Q5, QDg=QDg,
+                x_min=x_min, x_max=x_max, #delta_x_min=delta_x_min, delta_x_max=delta_x_max,
+                x_zero=x_step.flatten(), x_minus1=x_step.flatten(), s_minus1=features)
+                                    
+            K.setup() 
 
             print('MPC initialized.')
 
         # Update the MPC with the current values
-        print("Computing a new reference...")
+        #print("Computing a new reference...")
         
-        # State MPC read from the sensors
-        y_step = np.r_[features.reshape(ns,1),q.reshape(nq,1),q_dot.reshape(nq,1)] 
-        x_step = np.r_[features.reshape(ns,1),q.reshape(nq,1)] 
-        
-        K.update(x0_val = x_step.flatten(),
-                 s_d_val = des_features, 
-                 s_star_minus1_val = s_star_step, 
-                 y_minus1_val = y_step.flatten(), 
-                 A=A, B=B, C=C, D=D)
+        # Compute the new reference 
+        t_mpc_start = rospy.get_time()
+        t_mpc_start_wall = time.time()
+        K.update(x_zero = x_step.flatten(), A=A, B=B, s_d=des_features, solve=True)
+        t_mpc_wall = time.time() - t_mpc_start_wall
+        #print('MPC time:', rospy.get_time() - t_mpc_start)
+        #print('MPC time wall:', time.time() - t_mpc_start_wall)
+        #x_step_minus1 = x_step
+        #features_minus1 = features
 
         #Get the MPC ouptut
         s_star_step = K.output()
         
-        print("New reference computed: ", s_star_step)
+        #print("New reference computed: ", s_star_step)
 
         # Publish the new reference
         s_star_pixel = convert_to_pixel(s_star_step,intrinsic) # TODO: probably, no need anymore
@@ -469,8 +529,39 @@ if __name__ == '__main__':
         reference_features_msg.header.stamp = rospy.Time.now()
 
         vis_ref_seq.publish(reference_features_msg)
+        
+        elapsed_time =   rospy.get_time() - time_cycle_start
+        elapsed_time_wall =   time.time() - time_cycle_start_wall
+        #print('Elapsed time: ', elapsed_time)
+        #print('Elapsed time wall: ', elapsed_time_wall)
+        # Log time info
+
+        #df = pd.DataFrame({'t_comp_MPC': [t_mpc], 't_entire_loop': [elapsed_time]})
+        #df.to_csv(file_time, mode='a', header=False)
+
+        df = pd.DataFrame({
+            't_robot_sense':[t_robot_sense],
+            't_mpc': [t_mpc_wall], 
+            't_loop': [elapsed_time_wall], 
+            't_matrixes': [t_matrix], 
+            'T_MPC': [TMPC] })
+        df.to_csv(time_log_file,mode='a',index=True,header=False)    
+        
+        #rospy.on_shutdown(end_of_node,data_log)
+
+        #counter +=1
+        #with open(time_log_file,'ab') as f:
+        #scipy.io.savemat(file_name='esa_mirror_log', mdict=logged_data)
+        #scipy.io.savemat(time_log_file, data_to_log)   # append
+
+        #time_msg = Float32(elapsed_time_wall)
+        #comp_time_pub.publish(time_msg)
 
         rate.sleep()
+        
+        #if elapsed_time < TMPC:
+        #    rospy.sleep(TMPC-elapsed_time)
+        #print('Elapsed time 2: ',  rospy.get_time() - time_cycle_start)
 
         '''print('here')
         df = pd.DataFrame(J)
@@ -533,4 +624,3 @@ if __name__ == '__main__':
 
             visual_reference_sequence_msg.features.append(visualFeature_msg)
         '''
-        
