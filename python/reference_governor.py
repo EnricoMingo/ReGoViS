@@ -15,9 +15,13 @@ import numpy as np
 import scipy
 import pandas as pd
 import time
-#from mpcref.mpc import MPCController
-from mpcref.mpc_osqp import MPCController
 
+#from mpcref.mpc import MPCController
+#from mpcref.mpc_osqp import MPCController
+from mpcref.mpc_osqp_deltaqcnst import MPCController
+#from mpcref.mpc_qpoases_doubleslack_deltaqcnst import MPCController
+
+# Global variable for the feedback
 data = ModelStates()
 visual_features = VisualFeatures()
 
@@ -320,7 +324,7 @@ if __name__ == '__main__':
     qp_control_period = T # Assumption: the QP control period match with the discretization time of the system
         
     # Sampling time for the MPC (according to real-time)
-    TMPC = rospy.get_param('regovis_MPC_sampling_time', default=0.2) # s
+    TMPC = rospy.get_param('regovis_MPC_sampling_time', default=0.125) # s
 
     sim_on_earth = rospy.get_param('regovis_sim_on_earth', default=True)
 
@@ -334,6 +338,7 @@ if __name__ == '__main__':
 
     first_time = True
 
+    # Get the QP lambda parameter
     task_prop_name_srv = '/cartesian/visual_servoing_camera_link/get_task_properties'
     rospy.wait_for_service(task_prop_name_srv)
     try:
@@ -347,10 +352,10 @@ if __name__ == '__main__':
 
     # Time log
     time_log_file = '/tmp/reference_governor_times.csv'
-    df = pd.DataFrame({'t_robot_sense': [], 't_mpc': [], 't_loop': [], 't_matrixes':[], 'T_MPC':[]})
+    df = pd.DataFrame({'t_signals': [], 't_mpc': [], 't_loop': [], 't_matrixes':[], 'T_MPC':[]})
     df.to_csv(time_log_file,index=True)
 
-    # Wait for sensors once 
+    # Wait for sensors once than subscribe it with a callback
     global data 
     rospy.Subscriber("gazebo/model_states", ModelStates, model_states_cb)
     data = rospy.wait_for_message("gazebo/model_states", ModelStates, timeout=None)
@@ -383,7 +388,13 @@ if __name__ == '__main__':
 
         q = robot.model().getJointPosition() 
         #q_dot = robot.model().getJointVelocity()
-    
+
+        # End of the SENSING
+        t_robot_sense = time.time() - time_cycle_start_wall
+
+        # Start of MATRIX COMPUTATION 
+        t_matrix_start = time.time()
+            
         # Compute the jacobian of the robot
         J_camera = robot.model().getJacobian('camera_link') 
 
@@ -396,7 +407,6 @@ if __name__ == '__main__':
         #print('Message time: ', rospy.get_time() - time_message_start)
         #visual_features = rospy.wait_for_message("/image_processing/visual_features", VisualFeatures, timeout=None) # TODO : the topic name has to be a parameter
         features, depths = getFeaturesAndDepths(visual_features)
-        
         L = visjac_p(intrinsic, features, depths)
 
         # Robot's camera frame to camera sensor twist transformation TODO to get from cartesian interface
@@ -406,8 +416,6 @@ if __name__ == '__main__':
         J = np.matmul(L,V)
         J = np.matmul(J,J_camera)
         
-        t_robot_sense = time.time() - time_cycle_start_wall
-
         # Compute the Jacobian of the equality constraint (CMM in space, contacts Jacobian on earth)
         if sim_on_earth:
             #print('SIM ON EARTH') 
@@ -420,20 +428,23 @@ if __name__ == '__main__':
                 [J_contacts],
                 [J_com]
                 ])
+            #J_const = np.ones((J_const.shape[0],J_const.shape[1]))
         else: # in space
             #print('SIM IN SPACE')
             J_const, _ = robot.model().getCentroidalMomentumMatrix()
 
         # Build the matrices for the MPC # TODO check if the computation time is OK, use MARCO's function
-        t_matrix_start = time.time()
         A, B, C, D = compute_system_matrices(J,J_const,vs_gain,T,c)
+        
+        # End of MATRIX COMPUTATION
         t_matrix = time.time() - t_matrix_start
         #print('Matrices computation time : ', time.time()-t)
 
         # Useful dimensions
-        nx = A.shape[0]
-        ns = B.shape[1]
-        nq = nx - ns
+        if first_time:
+            nx = A.shape[0]
+            ns = B.shape[1]
+            nq = nx - ns
 
         # MPC state read from the sensors
         #y_step = np.r_[features.reshape(ns,1),q.reshape(nq,1),q_dot.reshape(nq,1)] 
@@ -471,34 +482,49 @@ if __name__ == '__main__':
             s_star_step = des_features
             
             # MPC weights
-            Q1 = 100*scipy.sparse.eye(ns)  # s_d - s
-            Q2 = 50*scipy.sparse.eye(ns)   # s_d - s_star
-            Q4 = 0*scipy.sparse.eye(nq)
-            QDg = scipy.sparse.eye(ns)
-            Q5 = 1e4    
+            sparse = True
+            if sparse: 
+                Q1 = 1.0*scipy.sparse.eye(ns)  # s_d - s
+                Q2 = 0.1*scipy.sparse.eye(ns)   # s_d - s_star
+                Q4 = 0.1*scipy.sparse.eye(nq)    # q_dot_i - q_dot_i-1
+                QDg = 0.1*scipy.sparse.eye(ns)   # s_star_i - s_star_i-1
+                Q5 = 1e4 #1e4    
+            else:
+                Q1 = 1.0*np.eye(ns)  # s_d - s
+                Q2 = 1.0*np.eye(ns)   # s_d - s_star
+                Q4 = 0.0001*np.eye(nq)    # q_dot_i - q_dot_i-1
+                QDg = 0.0001*np.eye(ns)   # s_star_i - s_star_i-1
+                Q5 = 1e2 #1e4    
             
-            # MPC constraints # TODO we can probably move this upper in the beginning of the main
+            # MPC constraints 
             q_dot_lower = -robot.model().getVelocityLimits() 
             q_dot_upper =  robot.model().getVelocityLimits() 
             q_lower, q_upper = robot.model().getJointLimits() 
-          
-            s_min = convert_to_normalized(0*np.ones(ns),intrinsic)
-            s_max = convert_to_normalized(np.array([640,480,640,480,640,480,640,480]),intrinsic) # TODO: can I get the size of the image from somewhere?
             
+            s_min = convert_to_normalized(35*np.ones(ns),intrinsic)
+            s_max = convert_to_normalized(np.array([640,480,640,480,640,480,640,480]),intrinsic) # TODO: can I get the size of the image from somewhere?
+
+            print('S_bound_min: ', s_min)
+            print('S_bound_max: ', s_max)
             #y_min = np.r_[s_min, q_lower, q_dot_lower]
             #y_max = np.r_[s_max, q_upper, q_dot_upper]
             x_min = np.r_[s_min, q_lower]
             x_max = np.r_[s_max, q_upper]
-            delta_x_min = np.r_[-1e6*np.ones(ns), TMPC * q_dot_lower] # TODO : enrico: is this correct?
-            delta_x_max = np.r_[ 1e6*np.ones(ns), TMPC * q_dot_upper]
+            
+            s_dot_bound = np.abs( convert_to_normalized(640*np.ones(ns),intrinsic) - convert_to_normalized(0*np.ones(ns),intrinsic) ) # 50 pixel al secondo
+            print('S_dot_bound: ', s_dot_bound)
+            #delta_x_min = np.r_[-1e6*np.ones(ns), TMPC * q_dot_lower] # TODO : enrico: is this correct?
+            #delta_x_max = np.r_[ 1e6*np.ones(ns), TMPC * q_dot_upper]
+            delta_x_min = np.r_[-TMPC*s_dot_bound, TMPC * q_dot_lower] # TODO : enrico: is this correct?
+            delta_x_max = np.r_[ TMPC*s_dot_bound, TMPC * q_dot_upper]
             
             # Setup Reference Governor
             K = MPCController(
                 A=A, B=B, 
                 s_d=features, 
                 Np=Np, 
+                x_min=x_min, x_max=x_max, delta_x_min=delta_x_min, delta_x_max=delta_x_max,
                 Q1=Q1, Q2=Q2, Q3=None, Q4=Q4, Q5=Q5, QDg=QDg,
-                x_min=x_min, x_max=x_max, #delta_x_min=delta_x_min, delta_x_max=delta_x_max,
                 x_zero=x_step.flatten(), x_minus1=x_step.flatten(), s_minus1=features)
                                     
             K.setup() 
@@ -511,8 +537,9 @@ if __name__ == '__main__':
         # Compute the new reference 
         t_mpc_start = rospy.get_time()
         t_mpc_start_wall = time.time()
+        
         K.update(x_zero = x_step.flatten(), A=A, B=B, s_d=des_features, solve=True)
-        t_mpc_wall = time.time() - t_mpc_start_wall
+        
         #print('MPC time:', rospy.get_time() - t_mpc_start)
         #print('MPC time wall:', time.time() - t_mpc_start_wall)
         #x_step_minus1 = x_step
@@ -521,15 +548,22 @@ if __name__ == '__main__':
         #Get the MPC ouptut
         s_star_step = K.output()
         
+        t_mpc_wall = time.time() - t_mpc_start_wall
+        
         #print("New reference computed: ", s_star_step)
 
         # Publish the new reference
+        # End of the SENSING
+        t_msg_start = time.time()
+
         s_star_pixel = convert_to_pixel(s_star_step,intrinsic) # TODO: probably, no need anymore
         reference_features_msg = fill_visualFeatures_msg(s_star_step)
         reference_features_msg.header.stamp = rospy.Time.now()
 
         vis_ref_seq.publish(reference_features_msg)
         
+        t_msg = time.time() - t_msg_start
+
         elapsed_time =   rospy.get_time() - time_cycle_start
         elapsed_time_wall =   time.time() - time_cycle_start_wall
         #print('Elapsed time: ', elapsed_time)
@@ -540,7 +574,7 @@ if __name__ == '__main__':
         #df.to_csv(file_time, mode='a', header=False)
 
         df = pd.DataFrame({
-            't_robot_sense':[t_robot_sense],
+            't_signals':[t_robot_sense+t_msg],
             't_mpc': [t_mpc_wall], 
             't_loop': [elapsed_time_wall], 
             't_matrixes': [t_matrix], 
