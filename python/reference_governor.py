@@ -73,6 +73,10 @@ def get_intrinsic_param(msg):
     intrinsic['cx'] = msg.K[2]
     intrinsic['cy'] = msg.K[5]
 
+    # Size of camera is not really an intrinsic parameter, but I save it here for convenience
+    intrinsic['height'] = msg.height
+    intrinsic['width'] = msg.width
+
     return intrinsic
 
 def getFeaturesAndDepths(msg):
@@ -88,11 +92,12 @@ def visjac_p(intrinsic, feat_vec, depths):
 
     # Taken and adapted from RCV Matlab toolbox
     # Reference:
-    # [1] P. Corke, "Robotics, Vision & Control: Fundamental algorithms in
-    # MATLAB," Springer, 2011
+    # P. Corke, "Robotics, Vision & Control: Fundamental algorithms in MATLAB," Springer, 2011
+    #
+    # Visp links: 
+    # https://visp-doc.inria.fr/doxygen/visp-daily/classvpFeaturePoint.html#afafc6dca7c571b8f2743defb1438fb44
+    # https://visp-doc.inria.fr/doxygen/visp-daily/tutorial-ibvs.html
     
-    # Visp link: https://visp-doc.inria.fr/doxygen/visp-daily/classvpFeaturePoint.html#afafc6dca7c571b8f2743defb1438fb44
-      
     L = np.zeros((feat_vec.shape[0], 6))
 
     for i in np.arange(0,feat_vec.shape[0],2): # iterate over the feature vector
@@ -317,13 +322,14 @@ if __name__ == '__main__':
     # Publisher for computation time
     comp_time_pub = rospy.Publisher("/reference_governor/time", Float32, queue_size=10, latch=True)
 
-    # TODO PUT THESE PARAMETERS IN THE LAUCH FILE
-    # Discretization sampling time
-    T = rospy.get_param('regovis_system_sampling_time', default=0.001) # s
-   
     # TODO: should be taken from the cartesian interface, NEED TO BE CONSISTENT WITH THE STACK OF TASK 
-    qp_control_period = T # Assumption: the QP control period match with the discretization time of the system
-        
+    # Discretization sampling time  -> NO NEED THIS ANYMORE: DONE WITH qp_control_rate
+    #T = rospy.get_param('regovis_system_sampling_time', default=0.001) # s
+    qp_control_rate = rospy.get_param('/ros_server_node/rate')
+    T = 1./qp_control_rate # Assumption: the QP control period match with the discretization time of the system
+
+    # TODO PUT THESE PARAMETERS IN THE LAUCH FILE
+    
     # Sampling time for the MPC (according to real-time)
     TMPC = rospy.get_param('regovis_MPC_sampling_time', default=0.125) # s
 
@@ -349,11 +355,11 @@ if __name__ == '__main__':
     except rospy.ServiceException, e:
         print("Service call failed: %s"%e)
 
-    vs_gain = qp_gain / qp_control_period # lambda from the stack / qp_control period
+    vs_gain = qp_gain / T # lambda from the stack / qp_control period
 
     # Time log
     time_log_file = '/tmp/reference_governor_times.csv'
-    df = pd.DataFrame({'t_signals': [], 't_mpc': [], 't_loop': [], 't_matrixes':[], 'T_MPC':[]})
+    df = pd.DataFrame({'t_signals': [], 't_mpc': [], 't_loop': [], 't_matrixes':[], 'T_MPC':[],'gamma_x': [], 'gamma_deltax':[], 's_star_seq' : []})
     df.to_csv(time_log_file,index=True)
 
     # Wait for sensors once than subscribe it with a callback
@@ -467,7 +473,7 @@ if __name__ == '__main__':
                 Q2 = 0.1*scipy.sparse.eye(ns)   # s_d - s_star
                 Q4 = 0.1*scipy.sparse.eye(nq)    # q_dot_i - q_dot_i-1
                 QDg = 0.1*scipy.sparse.eye(ns)   # s_star_i - s_star_i-1
-                Q5 = 1e4 #1e4    
+                Q5 = 1e6 #1e4    
             else:
                 Q1 = 1.0*np.eye(ns)  # s_d - s
                 Q2 = 1.0*np.eye(ns)   # s_d - s_star
@@ -480,8 +486,14 @@ if __name__ == '__main__':
             q_dot_upper =  robot.model().getVelocityLimits() 
             q_lower, q_upper = robot.model().getJointLimits() 
             
-            s_min = convert_to_normalized(35*np.ones(ns),intrinsic)
-            s_max = convert_to_normalized(np.array([640,480,640,480,640,480,640,480]),intrinsic) # TODO: can I get the size of the image from somewhere?
+            # Feature position limits
+            s_safety_margin = 100 # pixels
+            s_min = convert_to_normalized(s_safety_margin*np.ones(ns),intrinsic)
+            s_max = convert_to_normalized(np.array([intrinsic['width']-s_safety_margin, intrinsic['height']-s_safety_margin,
+                                                    intrinsic['width']-s_safety_margin, intrinsic['height']-s_safety_margin,
+                                                    intrinsic['width']-s_safety_margin, intrinsic['height']-s_safety_margin,
+                                                    intrinsic['width']-s_safety_margin, intrinsic['height']-s_safety_margin]), 
+                                                    intrinsic)
 
             print('S_bound_min: ', s_min)
             print('S_bound_max: ', s_max)
@@ -490,7 +502,8 @@ if __name__ == '__main__':
             x_min = np.r_[s_min, q_lower]
             x_max = np.r_[s_max, q_upper]
             
-            s_dot_bound = np.abs( convert_to_normalized(640*np.ones(ns),intrinsic) - convert_to_normalized(0*np.ones(ns),intrinsic) ) # 50 pixel al secondo
+            s_dot_limit = 640 # pixel per seconds
+            s_dot_bound = np.abs( convert_to_normalized(s_dot_limit*np.ones(ns),intrinsic) - convert_to_normalized(0*np.ones(ns),intrinsic) ) 
             print('S_dot_bound: ', s_dot_bound)
             #delta_x_min = np.r_[-1e6*np.ones(ns), TMPC * q_dot_lower]
             #delta_x_max = np.r_[ 1e6*np.ones(ns), TMPC * q_dot_upper]
@@ -525,7 +538,8 @@ if __name__ == '__main__':
 
         #Get the MPC ouptut
         s_star_step = K.output()
-        
+        s_star_seq, x_seq, gamma_x_seq, gamma_deltax_seq = K.full_output()
+
         t_mpc_wall = time.time() - t_mpc_start_wall
         
         #print("New reference computed: ", s_star_step)
@@ -552,7 +566,13 @@ if __name__ == '__main__':
             't_mpc': [t_mpc_wall], 
             't_loop': [elapsed_time_wall], 
             't_matrixes': [t_matrix], 
-            'T_MPC': [TMPC] })
+            'T_MPC': [TMPC],
+            'gamma_x': [np.max(np.abs(gamma_x_seq[0,:]))], # I actually save the sum of the current gamma_x
+            'gamma_deltax': [np.max(np.abs(gamma_deltax_seq[0,:]))], # I actually save the sum of the current gamma_x
+            's_star_seq' : [np.max(np.abs(x_seq[:,0])) ]
+             })
+
+
         df.to_csv(time_log_file,mode='a',index=True,header=False)    
         
         #comp_time_pub.publish(time_msg)
