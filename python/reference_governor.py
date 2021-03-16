@@ -328,16 +328,17 @@ if __name__ == '__main__':
     qp_control_rate = rospy.get_param('/ros_server_node/rate')
     T = 1./qp_control_rate # Assumption: the QP control period match with the discretization time of the system
 
-    # TODO PUT THESE PARAMETERS IN THE LAUCH FILE
-    
     # Sampling time for the MPC (according to real-time)
-    TMPC = rospy.get_param('regovis_MPC_sampling_time', default=0.125) # s
+    TMPC = rospy.get_param('regovis_MPC_sampling_time', default=0.125)
+    print('TMP: ', TMPC)
 
     sim_on_earth = rospy.get_param('regovis_sim_on_earth', default=True)
+    print('sim_on_earth: ', sim_on_earth)
 
     # MPC prediction horizon
     Np = rospy.get_param('regovis_preview_window_size', default=15)
-    
+    print('Np: ', Np)
+
     # c parameter: it is such that TMPC = c * T
     c = int(TMPC/T) 
 
@@ -469,10 +470,17 @@ if __name__ == '__main__':
             # MPC weights
             sparse = True
             if sparse: 
-                Q1 = 1.0*scipy.sparse.eye(ns)  # s_d - s
-                Q2 = 0.1*scipy.sparse.eye(ns)   # s_d - s_star
-                Q4 = 0.1*scipy.sparse.eye(nq)    # q_dot_i - q_dot_i-1
-                QDg = 0.1*scipy.sparse.eye(ns)   # s_star_i - s_star_i-1
+                
+                # low lambda
+                #Q1 = 100*scipy.sparse.eye(ns)  # s_d - s
+                #Q2 = 1*scipy.sparse.eye(ns)   # s_d - s_star
+                
+                # high lambda 
+                Q1 = 0.1*scipy.sparse.eye(ns)  # s_d - s
+                Q2 = 10.0*scipy.sparse.eye(ns)   # s_d - s_star
+                
+                QDg = 0.0*scipy.sparse.eye(ns)   # s_star_i - s_star_i-1
+                Q4 = 0.001*scipy.sparse.eye(nq)    # q_dot_i - q_dot_i-1
                 Q5 = 1e6 #1e4    
             else:
                 Q1 = 1.0*np.eye(ns)  # s_d - s
@@ -487,7 +495,7 @@ if __name__ == '__main__':
             q_lower, q_upper = robot.model().getJointLimits() 
             
             # Feature position limits
-            s_safety_margin = 100 # pixels
+            s_safety_margin = 20 # pixels
             s_min = convert_to_normalized(s_safety_margin*np.ones(ns),intrinsic)
             s_max = convert_to_normalized(np.array([intrinsic['width']-s_safety_margin, intrinsic['height']-s_safety_margin,
                                                     intrinsic['width']-s_safety_margin, intrinsic['height']-s_safety_margin,
@@ -502,7 +510,8 @@ if __name__ == '__main__':
             x_min = np.r_[s_min, q_lower]
             x_max = np.r_[s_max, q_upper]
             
-            s_dot_limit = 640 # pixel per seconds
+            # TODO: please double check this
+            s_dot_limit = 350 # pixel per seconds 
             s_dot_bound = np.abs( convert_to_normalized(s_dot_limit*np.ones(ns),intrinsic) - convert_to_normalized(0*np.ones(ns),intrinsic) ) 
             print('S_dot_bound: ', s_dot_bound)
             #delta_x_min = np.r_[-1e6*np.ones(ns), TMPC * q_dot_lower]
