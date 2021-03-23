@@ -37,7 +37,12 @@ if __name__ == '__main__':
     model = robot.model()
 
     # LOAD CONFIGURATION INTO A LIST
-    q_traj = []
+    data_time = pd.read_csv('reference_governor_times_for_looper.csv')                                   
+    x_seq = data_time['x_seq']
+    x_seq_np = eval("np."+x_seq[3]) # Take the last (in this case fourth element of the sequence)
+    q_traj = x_seq_np[:,8:8+35] # Take the part related to the joint positions. Size: Np x 35
+
+    #q_traj = []
 
     #######
     joint_states = JointState
@@ -50,7 +55,10 @@ if __name__ == '__main__':
     t.child_frame_id = "base_link"
 
     rate = rospy.Rate(10)  # 10hz
+ 
     for q in q_traj:
+    
+        print(q)
         now = rospy.get_rostime()
 
         model.setJointPositions(q)
