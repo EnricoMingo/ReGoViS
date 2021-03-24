@@ -15,6 +15,7 @@ import numpy as np
 import scipy
 import pandas as pd
 import time
+import sys
 
 #from mpcref.mpc import MPCController
 #from mpcref.mpc_osqp import MPCController
@@ -46,7 +47,7 @@ def extract_base_data(data):
     base_twist_gazebo = data.twist[id]
 
     base_pose = Affine3(pos=[base_pose_gazebo.position.x, base_pose_gazebo.position.y, base_pose_gazebo.position.z],
-                        rot=[base_pose_gazebo.orientation.w, base_pose_gazebo.orientation.x, base_pose_gazebo.orientation.y, base_pose_gazebo.orientation.z])
+                        rot=[base_pose_gazebo.orientation.x, base_pose_gazebo.orientation.y, base_pose_gazebo.orientation.z, base_pose_gazebo.orientation.w])
     base_twist = [base_twist_gazebo.linear.x, base_twist_gazebo.linear.y, base_twist_gazebo.linear.z, base_twist_gazebo.angular.x, base_twist_gazebo.angular.y, base_twist_gazebo.angular.z]
 
     return base_pose, base_twist
@@ -360,7 +361,7 @@ if __name__ == '__main__':
 
     # Time log
     time_log_file = '/tmp/reference_governor_times.csv'
-    df = pd.DataFrame({'t_signals': [], 't_mpc': [], 't_loop': [], 't_matrixes':[], 'T_MPC':[],'gamma_x': [], 'gamma_deltax':[], 's_star_seq' : []})
+    df = pd.DataFrame({'t_signals': [], 't_mpc': [], 't_loop': [], 't_matrixes':[], 'T_MPC':[],'gamma_x': [], 'gamma_deltax':[], 'x_seq' : [], 'time':[]})
     df.to_csv(time_log_file,index=True)
 
     # Wait for sensors once than subscribe it with a callback
@@ -373,6 +374,9 @@ if __name__ == '__main__':
     rospy.Subscriber("cartesian/visual_servoing_camera_link/features", VisualFeatures, visual_features_cb)
     visual_features = rospy.wait_for_message("cartesian/visual_servoing_camera_link/features", VisualFeatures, timeout=None) # TODO : /image_processing/visual_features
     
+    # To allow to properly log data
+    np.set_printoptions(threshold=sys.maxsize)
+
     # RG LOOP
     while not rospy.is_shutdown():
         
@@ -495,7 +499,7 @@ if __name__ == '__main__':
             q_lower, q_upper = robot.model().getJointLimits() 
             
             # Feature position limits
-            s_safety_margin = 20 # pixels
+            s_safety_margin = 25 # pixels
             s_min = convert_to_normalized(s_safety_margin*np.ones(ns),intrinsic)
             s_max = convert_to_normalized(np.array([intrinsic['width']-s_safety_margin, intrinsic['height']-s_safety_margin,
                                                     intrinsic['width']-s_safety_margin, intrinsic['height']-s_safety_margin,
@@ -532,21 +536,21 @@ if __name__ == '__main__':
 
             print('MPC initialized.')
 
-        
         # Compute the new reference 
         t_mpc_start = rospy.get_time()
         t_mpc_start_wall = time.time()
         
         # Update the MPC with the current values
         K.update(x_zero = x_step.flatten(), A=A, B=B, s_d=des_features, solve=True)
-        
+        print('MPC updated')
+
         #print('MPC time:', rospy.get_time() - t_mpc_start)
         #print('MPC time wall:', time.time() - t_mpc_start_wall)
         #x_step_minus1 = x_step
         #features_minus1 = features
 
         #Get the MPC ouptut
-        s_star_step = K.output()
+        #s_star_step = K.output()
         s_star_seq, x_seq, gamma_x_seq, gamma_deltax_seq = K.full_output()
 
         t_mpc_wall = time.time() - t_mpc_start_wall
@@ -578,9 +582,9 @@ if __name__ == '__main__':
             'T_MPC': [TMPC],
             'gamma_x': [np.max(np.abs(gamma_x_seq[0,:]))], # I actually save the sum of the current gamma_x
             'gamma_deltax': [np.max(np.abs(gamma_deltax_seq[0,:]))], # I actually save the sum of the current gamma_x
-            's_star_seq' : [np.max(np.abs(x_seq[:,0])) ]
+            'x_seq' : [ np.array_repr(x_seq[:,:]) ],
+            'time' : [rospy.get_rostime().secs]
              })
-
 
         df.to_csv(time_log_file,mode='a',index=True,header=False)    
         
