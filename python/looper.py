@@ -40,11 +40,10 @@ if __name__ == '__main__':
     model = createRobot()
 
     # LOAD CONFIGURATION INTO A LIST
-    data_time = pd.read_csv('reference_governor_times_for_looper.csv')                                   
+    data_time = pd.read_csv('/tmp/reference_governor_times.csv')                                   
+    
     x_seq = data_time['x_seq']
-    x_seq_np = eval("np."+x_seq[3]) # Take the last (in this case fourth element of the sequence)
-    q_traj = x_seq_np[:,8:8+35] # Take the part related to the joint positions. Size: Np x 35
-
+    
     #q_traj = []
 
     #######
@@ -59,35 +58,41 @@ if __name__ == '__main__':
 
     rate = rospy.Rate(10)  # 10hz
  
-    for q in q_traj:
-        now = rospy.get_rostime()
+    for k in range(0,len(x_seq)):
 
-        model.setJointPosition(q)
-        model.update()
+        print('Traj. n.: ',k)
 
-        joint_states.position = q
-        joint_states.header.stamp = now
+        x_seq_np = eval("np."+x_seq[k]) # Take the last (in this case fourth element of the sequence)
+        q_traj = x_seq_np[:,8:8+35] # Take the part related to the joint positions. Size: Np x 35
+
+        for q in q_traj:
+            now = rospy.get_rostime()
+
+            model.setJointPosition(q)
+            model.update()
+
+            joint_states.position = q
+            joint_states.header.stamp = now
+
+            #print(q[0:6])
+
+            joint_pub.publish(joint_states)
+
+            T = model.getFloatingBasePose() # floating base pose in world frame
+            t.header.stamp = now
+            t.transform.translation.x = T.translation[0]
+            t.transform.translation.y = T.translation[1]
+            t.transform.translation.z = T.translation[2]
+            quat = T.quaternion
+            t.transform.rotation.x = quat[0]
+            t.transform.rotation.y = quat[1]
+            t.transform.rotation.z = quat[2]
+            t.transform.rotation.w = quat[3]
 
 
-        print(q[0:6])
+            br.sendTransform(t)
 
-        joint_pub.publish(joint_states)
-
-        T = model.getFloatingBasePose() # floating base pose in world frame
-        t.header.stamp = now
-        t.transform.translation.x = T.translation[0]
-        t.transform.translation.y = T.translation[1]
-        t.transform.translation.z = T.translation[2]
-        quat = T.quaternion
-        t.transform.rotation.x = quat[0]
-        t.transform.rotation.y = quat[1]
-        t.transform.rotation.z = quat[2]
-        t.transform.rotation.w = quat[3]
-
-
-        br.sendTransform(t)
-
-        rate.sleep()
+            rate.sleep()
 
 
 
