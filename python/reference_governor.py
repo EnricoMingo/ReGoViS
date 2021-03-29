@@ -19,7 +19,8 @@ import sys
 
 #from mpcref.mpc import MPCController
 #from mpcref.mpc_osqp import MPCController
-from mpcref.mpc_osqp_deltaqcnst import MPCController
+#from mpcref.mpc_osqp_deltaqcnst import MPCController
+from mpcref.mpc_osqp_deltaqcnst_Qqdot import MPCController
 #from mpcref.mpc_qpoases_doubleslack_deltaqcnst import MPCController
 
 # Global variable for the feedback
@@ -52,9 +53,9 @@ def extract_base_data(data):
 
     return base_pose, base_twist
 
-# TODO: to be checked
 def extract_joint_data(data):
 
+    # On real robot joint position should be motor position
     joint_positions = data.link_position
     joint_velocities = data.link_velocity
 
@@ -114,19 +115,20 @@ def visjac_p(intrinsic, feat_vec, depths):
         y = xy[1] #(uv[1] - intrinsic['cy']) / intrinsic['fy']
 
         L_i = np.array([
-            [1/Z, 0,   -x/Z, -x*y,     (1+x*x), -y],
-            [0,   1/Z, -y/Z, -(1+y*y), x*y,      x]
+            [-1/Z, 0,   x/Z, x*y,     -(1+x*x),  y],
+            [0,   -1/Z, y/Z, (1+y*y), -x*y,     -x]
         ])
 
         #L_i = - np.matmul(np.diag([intrinsic['fx'], intrinsic['fy']]), L_i)
 
-        #L[i:i+2,:] = L_i
-        L[i:i+2,:] = -L_i
+        L[i:i+2,:] = L_i
+        #L[i:i+2,:] = -L_i
 
     return L
 
-# TODO: TO BE CHECKED: https://visp-doc.inria.fr/doxygen/visp-daily/tutorial-ibvs.html
 def convert_to_normalized(features_in_pixel,intrinsic):
+
+    # Ref.: https://visp-doc.inria.fr/doxygen/visp-daily/tutorial-ibvs.html
 
     features_normalized = np.array([])
 
@@ -162,14 +164,14 @@ def fill_visualFeatures_msg(data_in):
             
     visualFeatures_msg = VisualFeatures()
     
-    # TODO : this assumes that we work with points
+    # This assumes that we work with points
     for k in range(0,len(data_in),2):
 
         visualFeature_msg = VisualFeature()
     
         visualFeature_msg.x = data_in[k]  
         visualFeature_msg.y = data_in[k+1] 
-        visualFeature_msg.Z = 0.5 # TODO what should we put here??? The one at the final destination?
+        visualFeature_msg.Z = 0.5 # This depends on what the controller considers. It normally takes into account the Z of measured features
         visualFeature_msg.type = visualFeature_msg.POINT
         
         visualFeatures_msg.features.append(visualFeature_msg)
@@ -323,7 +325,6 @@ if __name__ == '__main__':
     # Publisher for computation time
     comp_time_pub = rospy.Publisher("/reference_governor/time", Float32, queue_size=10, latch=True)
 
-    # TODO: should be taken from the cartesian interface, NEED TO BE CONSISTENT WITH THE STACK OF TASK 
     # Discretization sampling time  -> NO NEED THIS ANYMORE: DONE WITH qp_control_rate
     #T = rospy.get_param('regovis_system_sampling_time', default=0.001) # s
     qp_control_rate = rospy.get_param('/ros_server_node/rate')
@@ -361,7 +362,7 @@ if __name__ == '__main__':
 
     # Time log
     time_log_file = '/tmp/reference_governor_times.csv'
-    df = pd.DataFrame({'t_signals': [], 't_mpc': [], 't_loop': [], 't_matrixes':[], 'T_MPC':[],'gamma_x': [], 'gamma_deltax':[], 'x_seq' : [], 'time':[]})
+    df = pd.DataFrame({'t_signals': [], 't_mpc': [], 't_loop': [], 't_matrixes':[], 'T_MPC':[],'gamma_x': [], 'gamma_deltax':[], 'x_seq' : [], 's_star_seq' : [], 'time':[]})
     df.to_csv(time_log_file,index=True)
 
     # Wait for sensors once than subscribe it with a callback
@@ -372,7 +373,7 @@ if __name__ == '__main__':
     # Get the current visual feature in normalized coordinates
     global visual_features
     rospy.Subscriber("cartesian/visual_servoing_camera_link/features", VisualFeatures, visual_features_cb)
-    visual_features = rospy.wait_for_message("cartesian/visual_servoing_camera_link/features", VisualFeatures, timeout=None) # TODO : /image_processing/visual_features
+    visual_features = rospy.wait_for_message("cartesian/visual_servoing_camera_link/features", VisualFeatures, timeout=None)
     
     # To allow to properly log data
     np.set_printoptions(threshold=sys.maxsize)
@@ -410,7 +411,7 @@ if __name__ == '__main__':
         # Compute the interaction matrix (image Jacobian)
         L = visjac_p(intrinsic, features, depths)
 
-        # Robot's camera frame to camera sensor twist transformation TODO to get from cartesian interface (Open an issue on open_sot_visualservoing)
+        # Robot's camera frame to camera sensor twist transformation TODO to get from cartesian interface (to be handled in open_sot_visualservoing)
         V = np.eye(6)
 
         # Compute the task Jacobian: L * V * J_camera
@@ -484,7 +485,7 @@ if __name__ == '__main__':
                 Q2 = 10.0*scipy.sparse.eye(ns)   # s_d - s_star
                 
                 QDg = 0.0*scipy.sparse.eye(ns)   # s_star_i - s_star_i-1
-                Q4 = 0.001*scipy.sparse.eye(nq)    # q_dot_i - q_dot_i-1
+                Q4 = 1*scipy.sparse.eye(nq)    # q_dot_i 
                 Q5 = 1e6 #1e4    
             else:
                 Q1 = 1.0*np.eye(ns)  # s_d - s
@@ -514,9 +515,9 @@ if __name__ == '__main__':
             x_min = np.r_[s_min, q_lower]
             x_max = np.r_[s_max, q_upper]
             
-            # TODO: please double check this
-            s_dot_limit = 350 # pixel per seconds 
-            s_dot_bound = np.abs( convert_to_normalized(s_dot_limit*np.ones(ns),intrinsic) - convert_to_normalized(0*np.ones(ns),intrinsic) ) 
+            # Bound on s_dot
+            s_dot_limit = 570 # pixel per seconds 
+            s_dot_bound = np.abs( convert_to_normalized(s_dot_limit*np.ones(ns),intrinsic)) 
             print('S_dot_bound: ', s_dot_bound)
             #delta_x_min = np.r_[-1e6*np.ones(ns), TMPC * q_dot_lower]
             #delta_x_max = np.r_[ 1e6*np.ones(ns), TMPC * q_dot_upper]
@@ -550,7 +551,7 @@ if __name__ == '__main__':
         #features_minus1 = features
 
         #Get the MPC ouptut
-        #s_star_step = K.output()
+        s_star_step = K.output()
         s_star_seq, x_seq, gamma_x_seq, gamma_deltax_seq = K.full_output()
 
         t_mpc_wall = time.time() - t_mpc_start_wall
@@ -583,6 +584,7 @@ if __name__ == '__main__':
             'gamma_x': [np.max(np.abs(gamma_x_seq[0,:]))], # I actually save the sum of the current gamma_x
             'gamma_deltax': [np.max(np.abs(gamma_deltax_seq[0,:]))], # I actually save the sum of the current gamma_x
             'x_seq' : [ np.array_repr(x_seq[:,:]) ],
+            's_star_seq' : [ np.array_repr(s_star_seq[:,:]) ],
             'time' : [rospy.get_rostime().secs]
              })
 
