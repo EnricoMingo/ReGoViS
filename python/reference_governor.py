@@ -476,17 +476,20 @@ if __name__ == '__main__':
             sparse = True
             if sparse: 
                 
-                # low lambda
-                #Q1 = 100*scipy.sparse.eye(ns)  # s_d - s
-                #Q2 = 1*scipy.sparse.eye(ns)   # s_d - s_star
-                
-                # high lambda 
-                Q1 = 0.1*scipy.sparse.eye(ns)  # s_d - s
-                Q2 = 10.0*scipy.sparse.eye(ns)   # s_d - s_star
-                
+                low_lambda = False
+
+                if low_lambda:
+                    # low lambda
+                    Q1 = 100*scipy.sparse.eye(ns)  # s_d - s
+                    Q2 = 1*scipy.sparse.eye(ns)   # s_d - s_star
+                else:                
+                    # high lambda 
+                    Q1 = 0.1*scipy.sparse.eye(ns)  # s_d - s
+                    Q2 = 10.0*scipy.sparse.eye(ns)   # s_d - s_star
+                    
                 QDg = 0.0*scipy.sparse.eye(ns)   # s_star_i - s_star_i-1
                 Q4 = 1*scipy.sparse.eye(nq)    # q_dot_i 
-                Q5 = 1e6 #1e4    
+                Q5 = 1e4 #1e4    
             else:
                 Q1 = 1.0*np.eye(ns)  # s_d - s
                 Q2 = 1.0*np.eye(ns)   # s_d - s_star
@@ -494,7 +497,7 @@ if __name__ == '__main__':
                 QDg = 0.0001*np.eye(ns)   # s_star_i - s_star_i-1
                 Q5 = 1e2 #1e4    
             
-            # MPC constraints 
+            # MPC constraints on q_dot -> to be handled as delta q
             q_dot_lower = -robot.model().getVelocityLimits() 
             q_dot_upper =  robot.model().getVelocityLimits() 
             q_lower, q_upper = robot.model().getJointLimits() 
@@ -515,7 +518,7 @@ if __name__ == '__main__':
             x_min = np.r_[s_min, q_lower]
             x_max = np.r_[s_max, q_upper]
             
-            # Bound on s_dot
+            # Bound on s_dot -> to be transformed in delta s
             s_dot_limit = 570 # pixel per seconds 
             s_dot_bound = np.abs( convert_to_normalized(s_dot_limit*np.ones(ns),intrinsic)) 
             print('S_dot_bound: ', s_dot_bound)
