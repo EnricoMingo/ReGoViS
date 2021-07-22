@@ -355,7 +355,7 @@ if __name__ == '__main__':
         task_info = rospy.ServiceProxy(task_prop_name_srv, GetTaskInfo)#, prova_getinfo)
         qp_gain = task_info().lambda_
         print('QP gain: ', qp_gain)
-    except rospy.ServiceException, e:
+    except rospy.ServiceException as e:
         print("Service call failed: %s"%e)
 
     vs_gain = qp_gain / T # lambda from the stack / qp_control period
@@ -366,12 +366,12 @@ if __name__ == '__main__':
     df.to_csv(time_log_file,index=True)
 
     # Wait for sensors once than subscribe it with a callback
-    global data 
+    #global data
     rospy.Subscriber("gazebo/model_states", ModelStates, model_states_cb)
     data = rospy.wait_for_message("gazebo/model_states", ModelStates, timeout=None)
     
     # Get the current visual feature in normalized coordinates
-    global visual_features
+    #global visual_features
     rospy.Subscriber("cartesian/visual_servoing_camera_link/features", VisualFeatures, visual_features_cb)
     visual_features = rospy.wait_for_message("cartesian/visual_servoing_camera_link/features", VisualFeatures, timeout=None)
     
@@ -420,16 +420,18 @@ if __name__ == '__main__':
         
         # Compute the Jacobian of the equality constraint (CMM in space, contacts Jacobian on earth)
         if sim_on_earth:
-            J_rf = robot.model().getJacobian('r_sole')
-            J_lf = robot.model().getJacobian('l_sole')
+            J_FL = robot.model().getJacobian('Wheel_FL')
+            J_FR = robot.model().getJacobian('Wheel_FR')
+            J_HR = robot.model().getJacobian('Wheel_HR')
+            J_HL = robot.model().getJacobian('Wheel_HL')
             J_contacts = np.block([ 
-                [J_rf],
-                [J_lf] 
+                [J_FL],
+                [J_FR],
+                [J_HR],
+                [J_HL]
                 ])
-            J_com = robot.model().getCOMJacobian()
             J_const = np.block([
-                [J_contacts],
-                [J_com]
+                [J_contacts]
                 ])
             #J_const = np.ones((J_const.shape[0],J_const.shape[1]))
         else: # in space
