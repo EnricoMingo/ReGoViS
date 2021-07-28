@@ -43,7 +43,7 @@ def createRobot():
     return xbot.RobotInterface(opt)
 
 def extract_base_data(data):
-    id = data.name.index("coman")
+    id = data.name.index("centauro")
     base_pose_gazebo = data.pose[id]
     base_twist_gazebo = data.twist[id]
 
@@ -309,12 +309,15 @@ if __name__ == '__main__':
 
     rospy.init_node("reference_governor")
 
-    # Create the robot 
+    # Create the robot
+    print("Creating robot...")
     robot = createRobot()
+    print("robot created!")
 
     # Subscriber to the camera_info topic
     camera_info_msg = rospy.wait_for_message("/camera/rgb/camera_info", CameraInfo, timeout=None)
     intrinsic = get_intrinsic_param(camera_info_msg)
+    print("Subscribed to camera info")
 
     # Publisher for the sequence of visual features. Indeed it is just the current value of the sequence
     vis_ref_seq = rospy.Publisher("/reference_governor/reference_features", VisualFeatures, queue_size=10, latch=True) #/visual_reference_governor/visual_reference_sequence
@@ -329,6 +332,8 @@ if __name__ == '__main__':
     #T = rospy.get_param('regovis_system_sampling_time', default=0.001) # s
     qp_control_rate = rospy.get_param('/ros_server_node/rate')
     T = 1./qp_control_rate # Assumption: the QP control period match with the discretization time of the system
+
+    print(f"T: {T}")
 
     # Sampling time for the MPC (according to real-time)
     TMPC = rospy.get_param('regovis_MPC_sampling_time', default=0.125)
@@ -349,7 +354,9 @@ if __name__ == '__main__':
     first_time = True
 
     # Get the QP lambda parameter
-    task_prop_name_srv = '/cartesian/visual_servoing_camera_link/get_task_properties'
+    visual_servoing_link = rospy.get_param('regovis_visual_servoing_link', default="visual_servoing_camera_link")
+    task_prop_name_srv = '/cartesian/' + visual_servoing_link +'/get_task_properties'
+    print(f"task_prop_name_srv: {task_prop_name_srv}")
     rospy.wait_for_service(task_prop_name_srv)
     try:
         task_info = rospy.ServiceProxy(task_prop_name_srv, GetTaskInfo)#, prova_getinfo)
@@ -369,11 +376,13 @@ if __name__ == '__main__':
     #global data
     rospy.Subscriber("gazebo/model_states", ModelStates, model_states_cb)
     data = rospy.wait_for_message("gazebo/model_states", ModelStates, timeout=None)
+    print("Subscribed to gazebo model state")
     
     # Get the current visual feature in normalized coordinates
     #global visual_features
-    rospy.Subscriber("cartesian/visual_servoing_camera_link/features", VisualFeatures, visual_features_cb)
-    visual_features = rospy.wait_for_message("cartesian/visual_servoing_camera_link/features", VisualFeatures, timeout=None)
+    rospy.Subscriber("cartesian/" + visual_servoing_link +"/features", VisualFeatures, visual_features_cb)
+    visual_features = rospy.wait_for_message("cartesian/" + visual_servoing_link + "/features", VisualFeatures, timeout=None)
+    print("Subscribed to visual features")
     
     # To allow to properly log data
     np.set_printoptions(threshold=sys.maxsize)
@@ -404,7 +413,7 @@ if __name__ == '__main__':
         t_matrix_start = time.time()
             
         # Compute the jacobian of the robot
-        J_camera = robot.model().getJacobian('camera_link') 
+        J_camera = robot.model().getJacobian('D435i_camera_color_optical_frame')
 
         # Fill the feature vector (stay in normalized coordinates)
         features, depths = getFeaturesAndDepths(visual_features)
@@ -420,15 +429,15 @@ if __name__ == '__main__':
         
         # Compute the Jacobian of the equality constraint (CMM in space, contacts Jacobian on earth)
         if sim_on_earth:
-            J_FL = robot.model().getJacobian('Wheel_FL')
-            J_FR = robot.model().getJacobian('Wheel_FR')
-            J_HR = robot.model().getJacobian('Wheel_HR')
-            J_HL = robot.model().getJacobian('Wheel_HL')
-            J_contacts = np.block([ 
-                [J_FL],
-                [J_FR],
-                [J_HR],
-                [J_HL]
+            J_wheel_1 = robot.model().getJacobian('wheel_1')
+            J_wheel_2 = robot.model().getJacobian('wheel_2')
+            J_wheel_3 = robot.model().getJacobian('wheel_3')
+            J_wheel_4 = robot.model().getJacobian('wheel_4')
+            J_contacts = np.block([
+                [J_wheel_1],
+                [J_wheel_2],
+                [J_wheel_3],
+                [J_wheel_4]
                 ])
             J_const = np.block([
                 [J_contacts]
