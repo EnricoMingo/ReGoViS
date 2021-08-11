@@ -1,0 +1,64 @@
+solver_options:
+    regularization: 1e-3
+    back_end: "qpoases"
+    
+stack:
+    - ["xtion", "RightArm", "LeftArm"]
+    - ["Postural"]
+    
+constraints: ["JointLimits", "VelocityLimits", "Wheel_FL", "Wheel_FR", "Wheel_HR", "Wheel_HL"]
+
+JointLimits:
+    type: JointLimits
+    
+VelocityLimits:
+    type: VelocityLimits
+    
+Wheel_FL:
+    type: "Cartesian"
+    distal_link: "wheel_1"
+    base_link: "world"
+    lambda: 0.1
+
+Wheel_FR:
+    type: "Cartesian"
+    distal_link: "wheel_2"
+    base_link: "world"
+    lambda: 0.1
+
+Wheel_HL:
+    type: "Cartesian"
+    distal_link: "wheel_3"
+    base_link: "world"
+    lambda: 0.1
+
+Wheel_HR:
+    type: "Cartesian"
+    distal_link: "wheel_4"
+    base_link: "world"
+    lambda: 0.1
+    
+LeftArm:
+    type: "Cartesian"
+    distal_link: "arm1_8"
+    base_link: "pelvis"
+    lambda: 0.1
+
+RightArm:
+    type: "Cartesian"
+    distal_link: "arm2_8"
+    base_link: "pelvis"
+    lambda: 0.1
+    
+Postural:
+    type: "Postural"
+    lambda: 0.01
+    
+xtion:
+    lib_name: "libCartesioVisualServoing.so"
+    type: "VisualServoing"
+    distal_link: "D435i_camera_color_optical_frame"
+    lambda: 0.0001
+    feature_type: "vpFeaturePoint"
+    number_of_features: 4
+    

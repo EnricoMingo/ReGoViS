@@ -16,7 +16,7 @@ def callback(data):
         point.y = desired_features_y[i]
         i += 1
 
-    pub = rospy.Publisher("/reference_governor/desired_features", VisualFeatures, queue_size=10)
+    pub = rospy.Publisher("/reference_governor/desired_features_input", VisualFeatures, queue_size=10)
     rate = rospy.Rate(10)  # 10hz
     for i in range(5):
         pub.publish(refs)

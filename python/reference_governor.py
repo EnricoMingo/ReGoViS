@@ -16,6 +16,8 @@ import scipy
 import pandas as pd
 import time
 import sys
+import tf
+
 
 #from mpcref.mpc import MPCController
 #from mpcref.mpc_osqp import MPCController
@@ -299,11 +301,25 @@ def compute_system_matrices(J,J_const,vs_gain,T,c):
 
 def model_states_cb(msg):
     global data
-    data = msg 
+    data = msg
 
 def visual_features_cb(msg):
     global visual_features
-    visual_features = msg 
+    visual_features = msg
+
+def callback_desired_features_input(msg):
+    global des_features
+    global des_feat_pub
+
+    des_features = np.array([])
+
+    for feature in msg.features:
+        des_features = np.append(des_features, np.array([
+            feature.x,
+            feature.y
+        ]))
+
+    des_feat_pub.publish(msg)
 
 if __name__ == '__main__':
 
@@ -327,6 +343,9 @@ if __name__ == '__main__':
     
     # Publisher for computation time
     comp_time_pub = rospy.Publisher("/reference_governor/time", Float32, queue_size=10, latch=True)
+
+    # Subscriber to set desired features to reference governor
+    desired_feature_sub = rospy.Subscriber("/reference_governor/desired_features_input", VisualFeatures, callback_desired_features_input, queue_size=1)
 
     # Discretization sampling time  -> NO NEED THIS ANYMORE: DONE WITH qp_control_rate
     #T = rospy.get_param('regovis_system_sampling_time', default=0.001) # s
@@ -383,9 +402,12 @@ if __name__ == '__main__':
     rospy.Subscriber("cartesian/" + visual_servoing_link +"/features", VisualFeatures, visual_features_cb)
     visual_features = rospy.wait_for_message("cartesian/" + visual_servoing_link + "/features", VisualFeatures, timeout=None)
     print("Subscribed to visual features")
-    
+
     # To allow to properly log data
     np.set_printoptions(threshold=sys.maxsize)
+
+    tf_listener = tf.TransformListener()
+    tf_listener.waitForTransform('ci/pelvis', 'ci/world', rospy.Time(), rospy.Duration(1.))
 
     # RG LOOP
     while not rospy.is_shutdown():
@@ -395,7 +417,11 @@ if __name__ == '__main__':
         time_cycle_start_wall = time.time() # in seconds # 
         
         # Sense robot state from Gazebo: FB pose and velocity
-        base_pose, base_twist = extract_base_data(data)        
+        #base_pose, base_twist = extract_base_data(data)
+        (base_pos, base_rot) = tf_listener.lookupTransform('ci/pelvis', 'ci/world', rospy.Time(0))
+        base_pose = Affine3(pos=[base_pos[0], base_pos[1], base_pos[2]],
+                            rot=[base_rot[0], base_rot[1], base_rot[2], base_rot[3]])
+        base_twist = [0., 0., 0., 0., 0., 0.]
         robot.sense()
         
         # Set the robot FB state
@@ -487,7 +513,7 @@ if __name__ == '__main__':
             sparse = True
             if sparse: 
                 
-                low_lambda = False
+                low_lambda = True
 
                 if low_lambda:
                     # low lambda
