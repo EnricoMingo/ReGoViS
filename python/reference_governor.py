@@ -32,8 +32,8 @@ visual_features = VisualFeatures()
 def createRobot():
     opt = xbot_opt.ConfigOptions()
 
-    urdf = rospy.get_param('xbotcore/robot_description')
-    srdf = rospy.get_param('xbotcore/robot_description_semantic')
+    urdf = rospy.get_param('robot_description')
+    srdf = rospy.get_param('robot_description_semantic')
 
     opt = xbot_opt.ConfigOptions()
     opt.set_urdf(urdf)
@@ -393,9 +393,9 @@ if __name__ == '__main__':
 
     # Wait for sensors once than subscribe it with a callback
     #global data
-    rospy.Subscriber("gazebo/model_states", ModelStates, model_states_cb)
-    data = rospy.wait_for_message("gazebo/model_states", ModelStates, timeout=None)
-    print("Subscribed to gazebo model state")
+    #rospy.Subscriber("gazebo/model_states", ModelStates, model_states_cb)
+    #data = rospy.wait_for_message("gazebo/model_states", ModelStates, timeout=None)
+    #print("Subscribed to gazebo model state")
     
     # Get the current visual feature in normalized coordinates
     #global visual_features
@@ -518,7 +518,7 @@ if __name__ == '__main__':
                 if low_lambda:
                     # low lambda
                     Q1 = 100*scipy.sparse.eye(ns)  # s_d - s
-                    Q2 = 1*scipy.sparse.eye(ns)   # s_d - s_star
+                    Q2 = 1.0*scipy.sparse.eye(ns)   # s_d - s_star
                 else:                
                     # high lambda 
                     Q1 = 0.1*scipy.sparse.eye(ns)  # s_d - s

@@ -19,15 +19,15 @@
 
     <node pkg="ReGoVis" type="image_processing_node.py" name="image_processing_node" output="screen">
     	<param name="depth" value="1.5"/>
-	<remap from="camera_info" to="/D435i/D435i_camera/infra1/camera_info"/>
-        <remap from="image_raw" to="/D435i/D435i_camera/color/image_raw"/>
+	<remap from="camera_info" to="/D435i/color/camera_info"/>
+        <remap from="image_raw" to="/D435i/color/image_raw"/>
         <remap from="image_processing/visual_features" to="cartesian/visual_servoing_D435i_camera_color_optical_frame/features"/>
         <remap from="desired_visual_features" to="reference_governor/desired_features"/>
         <remap from="image_processing/reference_features" to="cartesian/visual_servoing_D435i_camera_color_optical_frame/desired_features"/>
     </node> 
 
     <node pkg="ReGoVis" type="reference_governor.py" name="reference_governor" output="screen">
-    	<remap from="/camera/rgb/camera_info" to="/D435i/D435i_camera/infra1/camera_info"/>
+    	<remap from="/camera/rgb/camera_info" to="/D435i/color/camera_info"/>
 	    <remap from="reference_governor/reference_features" to="cartesian/visual_servoing_D435i_camera_color_optical_frame/desired_features"/>
     </node>
 
