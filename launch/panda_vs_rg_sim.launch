@@ -1,0 +1,36 @@
+<launch>
+
+    <arg name="prefix" default="cartesian"/>
+    
+    <!--param name="robot_description" command="$(find xacro)/xacro '$(find panda_camera_gazebo)/urdf/panda_arm_camera.urdf.xacro'" /-->
+    <!--param name="cartesian/robot_description" command="$(find xacro)/xacro '$(find franka_cartesio_config)/urdf/panda.urdf.xacro'" />
+    <param name="cartesian/robot_description_semantic" command="$(find xacro)/xacro '$(find franka_cartesio_config)/srdf/panda.srdf.xacro'" /-->
+    
+   	<!--arg name="stack" default="panda"/>       
+    <param name="cartesian/problem_description" textfile="$(find franka_cartesio_config)/stack/$(arg stack).stack"/-->
+
+    <!--include file="$(find cartesian_interface)/launch/cartesio.launch">
+        <arg name="namespace" value="cartesian"/>
+        <arg name="rate" value="1000.0"/>
+        <arg name="prefix" value="$(arg prefix)"/>
+        <arg name="is_model_floating_base" default="false"/>
+    </include-->
+
+    <node pkg="opensot_visual_servoing" type="image_processing_rg_node" name="image_processing_rg_node" output="screen">
+        <remap from="camera_info" to="d435_color/camera_info"/>
+        <remap from="image_raw/compressed" to="d435_color/image_raw/compressed"/>
+        <remap from="image_processing/visual_features" to="cartesian/visual_servoing_camera_link/features"/>
+        <remap from="desired_visual_features" to="reference_governor/desired_features"/>	
+        <remap from="image_processing/reference_features" to="cartesian/visual_servoing_camera_link/desired_features"/>	    
+	</node> 
+
+	 <!--node pkg="ReGoVis" type="reference_governor.py" name="reference_governor">
+
+	 <remap from="reference_governor/reference_features" to="cartesian/visual_servoing_camera_link/desired_features"/>
+	 </node-->
+
+	<!--rosparam param="regovis_MPC_sampling_time">0.1</rosparam>
+	<rosparam param="regovis_preview_window_size">10</rosparam> 
+	<rosparam param="image_processing/depth">4</rosparam-->
+    
+</launch>
